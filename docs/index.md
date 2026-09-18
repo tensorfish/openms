@@ -2,6 +2,8 @@
 
 OpenMS is a MapleStory client rewritten in JavaScript, with a matching server reimplementation. It converts the original WZ assets into deterministic, content-addressed browser resources and runs the game in the browser, with the original Windows client's behaviour recovered from decompilation, Ghidra evidence and retained captures rather than copied from the original binaries. Rendering, input, animation, audio and world streaming are browser-owned, while [gameplay](server/protocol.md) and saved state remain server-authoritative. The reimplementation targets fidelity to the original client over convenience, and the [validation](validation-method.md) and [evidence](validation.md) records state which behaviours are proved and which remain unverified — notably original Windows visual and audio parity.
 
+For native PowerShell and Docker Desktop, follow [Windows setup](windows-setup.md). It includes a launcher that waits for the database and game services and reuses existing assets.
+
 On macOS with [Homebrew](https://brew.sh/):
 
 ```sh
@@ -22,10 +24,11 @@ cp -n .env.server.example .env.server
 cp -n .env.client.example .env.client
 cp -n .env.studio.example .env.studio
 
-# Download and unpack the original assets beside the repository.
+# Download and unpack only WZ data beside the repository.
 curl --fail --location --output ../Maplestory-Assets.zip \
-  http://bucket.openms.dev/Maplestory-Assets.zip
-unzip -n ../Maplestory-Assets.zip -d .. -x '__MACOSX/*'
+  https://bucket.openms.dev/Maplestory-Assets.zip
+unzip -n ../Maplestory-Assets.zip 'Maplestory-Client/*.wz' -d ..
+rm ../Maplestory-Assets.zip
 
 # Generate client/public/generated/ and wait for "Extraction succeeded".
 bun extract --assets ../Maplestory-Client
@@ -44,6 +47,8 @@ bun run client:dev
 # Open http://127.0.0.1:3102 in your browser.
 # Sign in with admin / password or player / password, then select a character.
 ```
+
+The ZIP also contains Windows executables that have triggered antivirus detections. The browser game needs only WZ data; see [Inputs](inputs.md) before downloading.
 
 For other platforms, install [Bun](https://bun.sh/docs/installation), [Podman](https://podman.io/docs/installation) and a [Compose provider](https://docs.podman.io/en/latest/markdown/podman-compose.1.html); keep Git, `curl` and `unzip` available, then continue from checkout.
 

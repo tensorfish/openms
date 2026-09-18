@@ -1,0 +1,2 @@
+# Tutorial portal programs are verified against hashes of their original LF bytes.
+infra/gameplay-definitions/portal/*.js text eol=lf

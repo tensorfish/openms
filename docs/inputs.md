@@ -6,7 +6,9 @@ search: false
 
 For a fresh local setup, follow [Quick Start](index.md). Select your original WZ directory with `--assets`; the absolute paths below record the supplied evidence and are not required installation locations.
 
-Download the original asset ZIP from [Maplestory-Assets.zip](http://bucket.openms.dev/Maplestory-Assets.zip). It contains a top-level `Maplestory-Client/` directory with the WZ archives. Follow [Quick Start](index.md) to unpack it beside the repository, then pass `--assets ../Maplestory-Client`.
+Download the original asset ZIP from [Maplestory-Assets.zip](https://bucket.openms.dev/Maplestory-Assets.zip). It contains a top-level `Maplestory-Client/` directory with the WZ archives. Follow [Quick Start](index.md) or [Windows setup](windows-setup.md) to extract only its WZ data, then pass the data directory through `--assets`.
+
+During local setup on 2026-09-18, Microsoft Defender flagged `MapleStory.exe` as `Trojan:MSIL/Cryptor!rfn` and `Maplestory_UNPACKED.exe` as `PUA:Win32/GameHack` inside the downloaded ZIP. Neither executable was extracted or run. The 17 retained WZ files matched [the input manifest](input-manifest.json) and scanned clean. This records that scan result, not a guarantee about future downloads or file safety. EXE and DLL entries in the manifest document provenance; they are not runtime dependencies. Keep antivirus protection enabled, extract only WZ files, and delete the ZIP after retaining the required data.
 
 Original input directory: `/Users/k/Development/tensorfish/Maplestory-Client`.
 

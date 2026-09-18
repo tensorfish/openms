@@ -6,6 +6,8 @@ A browser reconstruction of MapleStory v83, built with JavaScript, PixiJS, Bun a
 
 ## Quick Start
 
+For native PowerShell and Docker Desktop, follow [Windows setup](docs/windows-setup.md). After first-time setup, `.\tools\start-local.ps1` starts the local game and reuses converted assets.
+
 ### 1. Install the prerequisites
 
 You need **Bun**, **Git**, **Podman**, a **Compose provider**, `curl` and `unzip`. Use a desktop browser with a viewport of at least 800 × 600.
@@ -37,14 +39,17 @@ Run the remaining commands from this **`openms` directory**. The copy commands c
 
 ```sh
 curl --fail --location --output ../Maplestory-Assets.zip \
-  http://bucket.openms.dev/Maplestory-Assets.zip
-unzip -n ../Maplestory-Assets.zip -d .. -x '__MACOSX/*'
-bun extract --assets [DIR]
+  https://bucket.openms.dev/Maplestory-Assets.zip
+unzip -n ../Maplestory-Assets.zip 'Maplestory-Client/*.wz' -d ..
+rm ../Maplestory-Assets.zip
+bun extract --assets ../Maplestory-Client
 ```
 
 Wait for **`Extraction succeeded`** before continuing, might take a few minutes, this is to optimize the assets for the web. Extraction writes the prepared content to `client/public/generated/`. If you already have the original assets, point `--assets` at the directory containing the WZ files.
 
 Gameplay definitions and reference SQL are included in the repository. No separate server-source checkout is needed. Reuse the extracted assets on later launches.
+
+The download also contains Windows executables that are unnecessary for the browser game and have triggered antivirus detections. Extract only the WZ data files, as above. See [asset safety and provenance](docs/inputs.md).
 
 ### 4. Start the database
 
