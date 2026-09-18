@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "window", "name": "Item", "entry": "keyboard", "close": "shortcut" },
+    { "type": "window", "name": "Equip", "entry": "keyboard", "close": "shortcut" },
+    { "type": "window", "name": "Stat", "entry": "keyboard", "close": "shortcut" },
+    { "type": "window", "name": "Skill", "entry": "keyboard", "close": "shortcut" },
+    { "type": "window", "name": "Item", "entry": "hud", "close": "escape" },
+    { "type": "window", "name": "Equip", "entry": "hud", "close": "escape" },
+    { "type": "window", "name": "Stat", "entry": "hud", "close": "escape" },
+    { "type": "window", "name": "Skill", "entry": "hud", "close": "escape" }
+  ]
+}

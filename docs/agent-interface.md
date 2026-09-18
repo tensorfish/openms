@@ -4,6 +4,8 @@ The online browser exposes `window.maple.agent` for normal player actions and re
 
 Await `maple.ready` before using either surface. Normal gameplay refusal remains a refusal, and development actions require a development server plus an authenticated developer character.
 
+For isolated agent bug discovery, use the [playtesting pipeline](agent-playtesting.md). It drives the real browser controls, records read-only observations and replayable action plans, and owns a disposable database instead of sharing the user's session.
+
 ## Permission and human takeover
 
 1. A human activates **Allow agent control** in the Agent section. A script-generated click cannot grant permission.

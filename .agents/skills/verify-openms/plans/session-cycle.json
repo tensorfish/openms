@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "walk", "direction": "right", "milliseconds": 300 },
+    { "type": "window", "name": "Item", "entry": "keyboard", "close": "shortcut" },
+    { "type": "relogin" },
+    { "type": "window", "name": "Equip", "entry": "hud", "close": "escape" },
+    { "type": "chat", "text": "Hello after signing in again", "mode": "send" }
+  ]
+}

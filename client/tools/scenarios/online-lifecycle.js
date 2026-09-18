@@ -361,9 +361,11 @@ async function deadLogout(page, tools) {
 export async function onlineIdentity(
   url,
   mapIds = [],
-  { development = true } = {},
+  { development = true, signal = undefined } = {},
 ) {
-  const response = await fetch(new URL("/generated/catalog.json", url));
+  const response = await fetch(new URL("/generated/catalog.json", url), {
+    signal,
+  });
   if (!response.ok) throw new Error(`Catalog HTTP ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -381,7 +383,9 @@ export async function onlineIdentity(
     }
     maps[id] = catalog.maps[id];
   }
-  const configResponse = await fetch(new URL("/api/v1/config", url));
+  const configResponse = await fetch(new URL("/api/v1/config", url), {
+    signal,
+  });
   if (!configResponse.ok) {
     throw new Error(`Configuration HTTP ${configResponse.status}`);
   }

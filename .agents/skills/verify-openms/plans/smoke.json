@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "walk", "direction": "right", "milliseconds": 400 },
+    { "type": "jump", "direction": "left" },
+    { "type": "window", "name": "Item", "entry": "keyboard" },
+    { "type": "window", "name": "Item", "entry": "hud" },
+    { "type": "window", "name": "Equip", "entry": "keyboard" },
+    { "type": "window", "name": "Equip", "entry": "hud" },
+    { "type": "window", "name": "Stat", "entry": "keyboard" },
+    { "type": "window", "name": "Stat", "entry": "hud" },
+    { "type": "window", "name": "Skill", "entry": "keyboard" },
+    { "type": "window", "name": "Skill", "entry": "hud" },
+    { "type": "reconnect" }
+  ]
+}

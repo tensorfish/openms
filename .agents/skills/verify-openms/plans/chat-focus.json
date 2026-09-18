@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "actions": [
+    { "type": "chat", "text": "i e s k draft should be discarded", "mode": "cancel" },
+    { "type": "window", "name": "Item", "entry": "keyboard" },
+    { "type": "chat", "text": "i e s k hello from the playtest", "mode": "send" },
+    { "type": "walk", "direction": "left", "milliseconds": 200 },
+    { "type": "walk", "direction": "right", "milliseconds": 200 }
+  ]
+}

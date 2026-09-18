@@ -11,86 +11,130 @@ import { startStudioServer } from "../../studio/tools/dev.js";
 import { measureStage } from "../../client/tools/native-evidence.js";
 
 /** Disposable database and listeners; never reset the configured development database. */
-export async function isolatedOnlineCheck({
-  seed,
-  run,
-  output,
-  studio = false,
-  productionClient = false,
-  network = null,
-  timings = {},
-}) {
-  const environment = loadEnvironment("server");
-  const name = `openms_check_${crypto.randomUUID().replaceAll("-", "")}`;
-  const admin = new SQL(environment.DATABASE_URL, { max: 1 });
-  const owner = {
-    admin,
-    name,
+export async function isolatedOnlineCheck(options) {
+  const settings = {
+    studio: false,
+    productionClient: false,
+    network: null,
+    timings: {},
+    databaseUrl: null,
+    serverPort: 3297,
+    clientPort: 3197,
+    browserOptions: {},
+    signal: null,
+    log: null,
+    onCleanup: null,
+    ...options,
+  };
+  checkPorts(settings.serverPort, settings.clientPort, settings.studio);
+  const environment = { ...loadEnvironment("server") };
+  if (settings.databaseUrl !== null) {
+    environment.DATABASE_URL = settings.databaseUrl;
+  }
+  const owner = createOwner(environment.DATABASE_URL);
+  const name = owner.name;
+  try {
+    await owner.admin.unsafe(`CREATE DATABASE "${name}"`);
+    owner.created = true;
+    const config = fixtureConfig(environment, name, settings);
+    const content = await startFixture(owner, config, settings);
+    const restart = async () => {
+      await owner.runtime.close();
+      owner.runtime = await startServer({
+        config,
+        content,
+        log: fixtureLog(settings, "server"),
+      });
+    };
+    return await settings.run({
+      browser: owner.browser,
+      url: config.origin,
+      studioUrl: config.studioOrigin,
+      output: settings.output,
+      restart,
+      network: settings.network,
+      disconnect: () => owner.client.disconnect(),
+      fixture: {
+        database: name,
+        serverPort: settings.serverPort,
+        clientPort: settings.clientPort,
+      },
+    });
+  } finally {
+    await measureStage(settings.timings, "fixtureTeardown", () =>
+      release(owner),
+    );
+    settings.onCleanup?.();
+  }
+}
+
+function createOwner(databaseUrl) {
+  return {
+    admin: new SQL(databaseUrl, { max: 1, connectionTimeout: 10 }),
+    name: `openms_check_${crypto.randomUUID().replaceAll("-", "")}`,
     created: false,
     runtime: null,
     client: null,
     studio: null,
     browser: null,
+    database: null,
   };
-  try {
-    await admin.unsafe(`CREATE DATABASE "${name}"`);
-    owner.created = true;
-    const config = fixtureConfig(environment, name, studio);
-    const { content, database } = await measureStage(
-      timings,
-      "databaseAndContent",
-      () => prepareDatabase(config.databaseUrl),
-    );
-    await measureStage(timings, "seed", () =>
-      seedDatabase(seed, database, content),
-    );
-    owner.runtime = await measureStage(timings, "serverStartup", () =>
-      startServer({ config, content, database }),
-    );
-    await measureStage(timings, "frontendStartup", () =>
-      startFrontends(owner, config, productionClient, network),
-    );
-    owner.browser = await measureStage(timings, "browserAcquisition", () =>
-      launchBrowser(),
-    );
-    const restart = async () => {
-      await owner.runtime.close();
-      owner.runtime = await startServer({ config, content });
-    };
-    return await run({
-      browser: owner.browser,
-      url: config.origin,
-      studioUrl: config.studioOrigin,
-      output,
-      restart,
-      network,
-      disconnect: () => owner.client.disconnect(),
-    });
-  } finally {
-    await measureStage(timings, "fixtureTeardown", () => release(owner));
+}
+
+async function startFixture(owner, config, settings) {
+  const { timings, signal } = settings;
+  signal?.throwIfAborted();
+  const { content, database } = await measureStage(
+    timings,
+    "databaseAndContent",
+    () => prepareDatabase(config.databaseUrl),
+  );
+  owner.database = database;
+  await measureStage(timings, "seed", () => settings.seed(database, content));
+  signal?.throwIfAborted();
+  owner.runtime = await measureStage(timings, "serverStartup", () =>
+    startServer({
+      config,
+      content,
+      database,
+      log: fixtureLog(settings, "server"),
+    }),
+  );
+  await measureStage(timings, "frontendStartup", () =>
+    startFrontends(owner, config, settings),
+  );
+  signal?.throwIfAborted();
+  owner.browser = await measureStage(timings, "browserAcquisition", () =>
+    launchBrowser(settings.browserOptions),
+  );
+  signal?.throwIfAborted();
+  return content;
+}
+
+function checkPorts(serverPort, clientPort, studio) {
+  const ports = studio
+    ? [serverPort, clientPort, 3198]
+    : [serverPort, clientPort];
+  if (
+    new Set(ports).size !== ports.length ||
+    ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)
+  ) {
+    throw new Error("Isolated listeners require distinct ports in 1..65535");
   }
 }
 
-function fixtureConfig(environment, name, studio) {
+function fixtureConfig(environment, name, { studio, serverPort, clientPort }) {
   const url = new URL(environment.DATABASE_URL);
   url.pathname = `/${name}`;
   return serverConfig({
     ...environment,
     DATABASE_URL: url.href,
     OPENMS_MODE: "development",
-    OPENMS_PORT: "3297",
-    OPENMS_ORIGIN: "http://127.0.0.1:3197",
+    OPENMS_HOST: "127.0.0.1",
+    OPENMS_PORT: String(serverPort),
+    OPENMS_ORIGIN: `http://127.0.0.1:${clientPort}`,
     OPENMS_STUDIO_ORIGIN: studio ? "http://127.0.0.1:3198" : "",
   });
-}
-
-async function seedDatabase(seed, database, content) {
-  try {
-    await seed(database, content);
-  } catch (error) {
-    await database.close();
-    throw error;
-  }
 }
 
 async function prepareDatabase(url) {
@@ -100,18 +144,24 @@ async function prepareDatabase(url) {
   return { content, database };
 }
 
-async function startFrontends(owner, config, productionClient, network) {
+function fixtureLog(settings, component) {
+  return settings.log ? settings.log.bind(null, component) : undefined;
+}
+
+async function startFrontends(owner, config, settings) {
   owner.client = await startOnlineDevServer({
-    port: 3197,
-    upstream: "http://127.0.0.1:3297",
-    production: productionClient,
-    network,
+    hostname: "127.0.0.1",
+    port: Number(new URL(config.origin).port),
+    upstream: `http://127.0.0.1:${config.port}`,
+    production: settings.productionClient,
+    network: settings.network,
+    log: fixtureLog(settings, "client"),
   });
   if (config.studioOrigin) {
     owner.studio = await startStudioServer({
       hostname: "127.0.0.1",
       port: 3198,
-      upstream: "http://127.0.0.1:3297",
+      upstream: `http://127.0.0.1:${config.port}`,
       clientUrl: config.origin,
       contentRoot: config.contentRoot,
     });
@@ -125,7 +175,7 @@ async function release(owner) {
     closeResource("studio", () => owner.studio?.close()),
     closeResource(
       "runtime",
-      () => owner.runtime?.close(),
+      () => (owner.runtime ? owner.runtime.close() : owner.database?.close()),
       () => ({
         worldClosed: owner.runtime?.world.closed,
         pendingRequests: owner.runtime?.server.pendingRequests,
@@ -163,6 +213,11 @@ async function closeResource(label, close, diagnostic = () => null) {
   }
 }
 
-async function launchBrowser() {
-  return (await acquireBrowser({})).browser;
+async function launchBrowser(options) {
+  if (options.browser || options.browserWSEndpoint) {
+    throw new Error(
+      "The isolated fixture must own its browser; pass chrome/headed options only",
+    );
+  }
+  return (await acquireBrowser(options)).browser;
 }

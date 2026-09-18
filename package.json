@@ -16,6 +16,7 @@
     "server:prod": "NODE_ENV=production bun server/src/index.js",
     "client:dev": "bun client/tools/dev-online.js",
     "client:prod": "bun client/tools/prod-online.js",
+    "playtest": "bun server/tools/playtest.js",
     "dev:docs": "bunx --bun vitepress dev docs",
     "docs:check": "bun docs/tools/check.js",
     "docs:build": "bunx --bun vitepress build docs",
