@@ -12,6 +12,7 @@ import {
 } from "../physics/simulation.js";
 import { FLASH_SKILLS } from "../skills/skill-world-rules.js";
 import { inputTargetTick } from "./input-timing.js";
+import { constrainGroundPresentation } from "./prediction-contact.js";
 
 const STALE_OBSERVATION_MS = 5000;
 /** Ease even small disagreements: repeatedly snapping a few pixels is visible jitter.
@@ -532,6 +533,8 @@ export class OnlinePrediction {
   interpolate(now, target) {
     if (!this.simulation) return target;
     this.interpolateKernel(now, target);
+    const baseX = target.x;
+    const baseY = target.y;
     const remaining = this.correctionUntil - now;
     if (remaining > 0) {
       // Smoothstep removes the velocity discontinuity a linear ramp leaves at both ends,
@@ -540,9 +543,22 @@ export class OnlinePrediction {
       target.x += this.correctionX * fraction;
       target.y += this.correctionY * fraction;
     }
+    this.constrainPresentation(target, baseX, baseY);
     this.drawnX = target.x;
     this.drawnY = target.y;
     return target;
+  }
+
+  /** Ground contact wins over an old airborne offset, including predicted hit recoil. */
+  constrainPresentation(target, baseX, baseY) {
+    const sim = this.hitPreview?.sourceId
+      ? this.hitPreview.simulation
+      : this.simulation;
+    if (sim.state !== "ground" || sim.seat) return;
+    this.correctionY = 0;
+    if (!constrainGroundPresentation(sim, target, baseX, baseY)) {
+      this.correctionX = 0;
+    }
   }
 
   predict(held, transmit) {

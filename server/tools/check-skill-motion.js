@@ -15,8 +15,8 @@ async function seed(database, scope) {
   });
   const profile = createProfile({
     mapId: "100000000",
-    x: scope === "walk" ? 80 : 0,
-    y: scope === "walk" ? 274 : 0,
+    x: scope === "skills" ? 0 : 80,
+    y: scope === "skills" ? 0 : 274,
     facing: 1,
   });
   profile.name = "Motion";
@@ -42,12 +42,12 @@ if (import.meta.main) {
   });
   if (flags.help) {
     console.log(
-      "bun server/tools/check-skill-motion.js [--output DIR] [--scope skills|walk] [--round-trip-ms 0..2000] [--baseline]",
+      "bun server/tools/check-skill-motion.js [--output DIR] [--scope skills|walk|landing] [--round-trip-ms 0..2000] [--baseline]",
     );
   } else {
     const scope = flags.scope ?? "skills";
     const roundTripMs = Number(flags["round-trip-ms"] ?? 0);
-    if (!["skills", "walk"].includes(scope)) {
+    if (!["skills", "walk", "landing"].includes(scope)) {
       throw new Error("Unknown motion scope");
     }
     if (
@@ -62,9 +62,10 @@ if (import.meta.main) {
     const report = await isolatedOnlineCheck({
       seed: (database) => seed(database, scope),
       run: (options) =>
-        scope === "walk"
+        scope !== "skills"
           ? runWalkMotion({
               ...options,
+              scope,
               roundTripMs,
               baseline: Boolean(flags.baseline),
             })

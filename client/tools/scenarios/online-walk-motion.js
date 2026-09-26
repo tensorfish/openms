@@ -29,7 +29,9 @@ function sampleFrames() {
       kernelX: state.simulation.x,
       kernelY: state.simulation.y,
       previousX: state.simulation.previousX,
+      previousY: state.simulation.previousY,
       vx: state.simulation.vx,
+      vy: state.simulation.vy,
       state: state.simulation.state,
       ...state.prediction,
     });
@@ -90,12 +92,14 @@ export async function runWalkMotion({
   network,
   roundTripMs,
   baseline,
+  scope = "walk",
 }) {
   await mkdir(output, { recursive: true });
   const report = {
     status: "running",
     roundTripMs,
     baseline,
+    scope,
     timings: {},
     results: [],
     errors: [],
@@ -115,17 +119,11 @@ export async function runWalkMotion({
     await prepareWalk(page, network, report);
     await page.evaluate(sampleFrames);
     await measureStage(report.timings, "walks", () =>
-      walks(page, network, report),
+      scope === "landing"
+        ? jumps(page, network, report)
+        : walks(page, network, report),
     );
-    const probe = await page.evaluate(() => {
-      window.__walkMotionProbe.running = false;
-      return window.__walkMotionProbe;
-    });
-    await Bun.write(join(output, "frames.json"), JSON.stringify(probe.rows));
-    report.analysis = report.holds.map((entry) => analyze(probe.rows, entry));
-    report.recovery = recovery(probe.rows);
-    assertion(!probe.overflow, "Walking sampler exhausted");
-    assertion(report.errors.length === 0, "Browser errors");
+    await collectMotion(page, report, { output, url });
     if (!baseline) verify(report);
     report.status = "pass";
   } catch (error) {
@@ -141,6 +139,28 @@ export async function runWalkMotion({
     );
   }
   return report;
+}
+
+async function collectMotion(page, report, { output, url }) {
+  const probe = await page.evaluate(() => {
+    window.__walkMotionProbe.running = false;
+    return window.__walkMotionProbe;
+  });
+  await Bun.write(join(output, "frames.json"), JSON.stringify(probe.rows));
+  report.analysis =
+    report.scope === "walk"
+      ? report.holds.map((entry) => analyze(probe.rows, entry))
+      : [];
+  report.recovery = recovery(probe.rows);
+  report.contact = analyzeContact(probe.rows);
+  assertion(!probe.overflow, "Movement sampler exhausted");
+  assertion(report.errors.length === 0, "Browser errors");
+  assertion(
+    (await page.evaluate(() => window.maple.snapshot().sourceBuildId)) ===
+      report.identity.sourceBuildId &&
+      (await onlineIdentity(url)).source === report.identity.source,
+    "Movement check source identity changed",
+  );
 }
 
 async function prepareWalk(page, network, report) {
@@ -173,11 +193,58 @@ async function walks(page, network, report) {
   await pause(report.roundTripMs + 1600);
 }
 
+/** Ordinary jump input with delayed landings and one stalled airborne interval. */
+async function jumps(page, network, report) {
+  for (const key of [null, null, "ArrowRight", "ArrowLeft", null, null]) {
+    if (key) await page.keyboard.down(key);
+    await page.keyboard.down("Space");
+    await pause(90);
+    await page.keyboard.up("Space");
+    await pause(150);
+    if (report.holds.length === 4) network.stall(1500);
+    await pause(450);
+    if (key) await page.keyboard.up(key);
+    report.holds.push({ key, jump: true });
+    await pause(1900);
+  }
+  await pause(report.roundTripMs + 1600);
+}
+
+/** The fixture stays on the original flat town floor; allow one landing quantum. */
+function analyzeContact(rows) {
+  let floatingFrames = 0,
+    maximumGap = 0,
+    airborneFrames = 0;
+  for (const row of rows) {
+    if (row.state === "air") airborneFrames++;
+    if (
+      row.state !== "ground" ||
+      Math.abs(row.kernelY - row.previousY) > 0.001
+    ) {
+      continue;
+    }
+    const gap = Math.abs(row.y - row.kernelY);
+    maximumGap = Math.max(maximumGap, gap);
+    if (gap > 0.01) floatingFrames++;
+  }
+  return { floatingFrames, maximumGap, airborneFrames };
+}
+
 function verify(report) {
-  for (const walk of report.analysis) {
+  for (const walk of report.scope === "walk" ? report.analysis : []) {
     assertion(walk.frames >= 80, "Insufficient steady walking frames");
     assertion(walk.maximumBackstep < 1, "Held walking visibly moves backward");
     assertion(walk.longestPauseMs < 100, "Held walking visibly pauses");
+  }
+  if (report.scope === "landing") {
+    assertion(
+      report.contact.airborneFrames >= 80,
+      "Insufficient native jump frames",
+    );
+    assertion(
+      report.contact.floatingFrames === 0,
+      "Landed character floats off its floor",
+    );
   }
   assertion(
     report.recovery.notReady === 0,
