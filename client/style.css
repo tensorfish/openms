@@ -52,7 +52,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-right: auto;
   padding: 0 8px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -79,6 +78,7 @@ body {
   color: #6b6b6b;
 }
 #project-players {
+  margin-right: auto;
   padding: 0 8px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
