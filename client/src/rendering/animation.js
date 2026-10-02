@@ -12,6 +12,20 @@ const GHOST_PERIOD_MS = 2000;
 const GHOST_RADIUS = 10;
 const GHOST_CENTER_Y = -20;
 
+/** Blink scheduling — user-facing timing.
+ *  Every 5-8 s, roll a 4-way uniform decision:
+ *    0 → skip this round (no blink)
+ *    1 → 1 quick blink  (expressionLoopMs ≈ 480 ms)
+ *    2 → 2 quick blinks (≈ 960 ms total)
+ *    3 → 3 quick blinks (≈ 1440 ms total)
+ *  Before the expressionLoopMs fix (was incorrectly using expressionDuration=5000),
+ *  consecutive blinks looked pathological — each blink lasted 5 s instead of 480 ms.
+ *  Now each blink is one clean sub-frame cycle, so 2-3 in a row reads as a quick
+ *  natural double/triple blink rather than a stuck state. */
+const BLINK_IDLE_MIN_MS = 5000;
+const BLINK_IDLE_RANGE_MS = 3000;
+const BLINK_MODES = 4;
+
 /** Shape2D51406ffa..51407045 rounds rotated vectors before adding their origin. */
 function vectorPixel(value) {
   return Math.trunc(value + (value >= 0 ? 0.5 : -0.499999999));
@@ -61,6 +75,16 @@ export class EntityAnimation {
     this.expressionDurations = new Map();
     this.actions = new Map();
     this.expressions = new Set(["default"]);
+    /** Auto-blink scheduling state. Only active for character entities that
+     *  have a compiled `blink` face expression. */
+    this.blinkState = {
+      /** Countdown until the next blink decision (ms). 0 = immediate decision. */
+      nextDecisionMs: 0,
+      /** Remaining consecutive blinks in the current run. */
+      remainingBlinks: 0,
+      /** True when a `blink` call is currently playing. */
+      blinking: false,
+    };
     this.tint = 0xffffff;
     this.container = new Container({ label: entity.id });
     this.setPosition(entity.x, entity.y);
@@ -186,6 +210,13 @@ export class EntityAnimation {
   }
 
   /** Half-open authored face-frame intervals advance independently of body frames. */
+   *  Real extracted data structure confirmed: body/weapon/equipment parts carry
+   *  NO expression field (always visible), while face variants (default, blink,
+   *  hit, smile, ...) DO carry expression. The match-based filter below is
+   *  therefore correct — only face variants participate in expression gating.
+   *  GM-source L1339-L1342 handles face/weapon visibility via separate part
+   *  categories — openms flattens everything into one list so we rely on
+   *  absence of expression on non-face parts to keep them visible. */
   expressionVisible(part) {
     if (!part) return false;
     if (!part.expression) return true;
@@ -202,9 +233,83 @@ export class EntityAnimation {
   advance(ms) {
     const advanced = advanceActionClock(this, ms);
     this.advanceExpression(ms);
+    this.advanceBlink(ms);
     this.applyDeathMotion();
     this.equipmentEffects?.advance(ms);
     if (advanced) this.selectTimedFrame();
+  }
+
+  /** Automatic blink scheduler for character entities that have a `blink` face
+   *  expression. Mirrors GM MapleCharacter.pas L1290-L1332 and sdlms run_face_animate:
+   *  4-mode random decision (0 = skip, 1..3 = consecutive blinks) every 3-6 s.
+   *  Unlike the previous attempt, this runs ALWAYS (mirroring GM source which
+   *  does NOT gate blink scheduling on body pose) — the expressionVisible fix
+   *  guarantees that blink+attack won't hide weapon/body parts with expression:"default".
+   *  Non-default face expressions (player-triggered smile/wink/etc.) suppress
+   *  the blink scheduler so they play out completely. */
+  advanceBlink(ms) {
+    if (this.kind !== "character" || !this.expressions.has("blink")) return;
+
+    // A blink is currently playing — let it finish. advanceExpression handles
+    // the duration countdown; we just mark blinking for the post-blink branch.
+    if (this.expression === "blink") {
+      this.blinkState.blinking = true;
+      return;
+    }
+
+    // Player-triggered non-default expression (smile, wink, oops, ...) takes
+    // full control — pause the idle blink scheduler but keep existing counters.
+    // When expression returns to default, normal scheduling resumes.
+    if (this.expression !== "default") return;
+
+    // Just returned from a blink to default — decide whether consecutive.
+    // remainingBlinks tracks how many total blinks this round still needs.
+    if (this.blinkState.blinking) {
+      this.blinkState.blinking = false;
+      if (this.blinkState.remainingBlinks > 1) {
+        this.blinkState.remainingBlinks -= 1;
+        this._triggerBlink();
+        return;
+      }
+      // Final blink in the round — reset counters, schedule next decision.
+      this.blinkState.remainingBlinks = 0;
+      this.blinkState.nextDecisionMs =
+        BLINK_IDLE_MIN_MS + Math.random() * BLINK_IDLE_RANGE_MS;
+      return;
+    }
+
+    // Regular scheduler countdown. Always runs (mirror GM source FaceCount
+    // which increments every frame regardless of body action).
+    if (this.blinkState.nextDecisionMs > 0) {
+      this.blinkState.nextDecisionMs -= ms;
+      if (this.blinkState.nextDecisionMs > 0) return;
+      this.blinkState.nextDecisionMs = 0;
+    }
+
+    // 4-way uniform roll: 0 = skip, 1 = single, 2 = double, 3 = triple.
+    // remainingBlinks IS the TOTAL count this round (post-blink decrements when > 1).
+    const mode = Math.floor(Math.random() * BLINK_MODES);
+    if (mode === 0) {
+      this.blinkState.nextDecisionMs =
+        BLINK_IDLE_MIN_MS + Math.random() * BLINK_IDLE_RANGE_MS;
+      return;
+    }
+    this.blinkState.remainingBlinks = mode;
+    this._triggerBlink();
+  }
+
+  _triggerBlink() {
+    // expressionLoops holds the authored per-expression cycle (480 ms for blink
+    // from extracted data), while expressionDuration is a generic 5-second
+    // max-lifetime shared by ALL face expressions — not the blink animation
+    // duration. GM source uses a multi-frame FaceFrame/FaceTime mechanism; we
+    // collapse it into one expressionLoopMs cycle here.
+    const loopMs = this.expressionLoops.get("blink");
+    const duration = Number.isFinite(loopMs) && loopMs > 0
+      ? loopMs
+      : this.expressionDurations.get("blink");
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    this.setExpression("blink", duration);
   }
 
   /** Seek an authoritative action clock without exposing mutable frame bookkeeping.
