@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createProfile } from "../../client/src/profile/profile-validation.js";
 import { nearestSavedArrival } from "../../client/src/world/field-arrival.js";
 
@@ -14,7 +15,8 @@ export async function bootstrapDevelopmentAccounts(
 ) {
   const manifest = await content.map(content.catalog.defaultMap);
   const arrival = nearestSavedArrival(manifest, { x: 0, y: 0, facing: 1 });
-  const password = environment.OPENMS_DEV_PASSWORD ?? "password";
+  const password =
+    environment.OPENMS_DEV_PASSWORD ?? randomBytes(16).toString("base64url");
   const passwordHash = await Bun.password.hash(password, {
     algorithm: "argon2id",
   });
