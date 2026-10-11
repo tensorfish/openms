@@ -8,16 +8,28 @@ import { mobFlipped } from "./mob-movement-metadata.js";
 const MAX_PENDING_TEMPLATES = 2;
 const PREFETCH_VIEWPORTS = 0.5;
 
-/** Debug mob HP bar — mirrors sdlMS gauge_render_system layout:
- *  fixed 50×8 outer frame, 44×4 inner fill inset by 3px on each side.
- *  Two-layer fill: red = lerp-delayed (slow drain), green = actual hp (instant).
- *  The gap between red and green fills gives the "slowly draining after hit" effect.
+/** Mob HP bar — 52×10 nested-frame gauge:
+ *  Layer order (outer → inner): black 1px → white 1px → black 1px.
+ *  Inner fill region is 46×4, split into top 3px HP-color fill + bottom 1px dark-red accent.
  *  Hidden when full or dead. */
-const GAUGE_OUTER_W = 50;
-const GAUGE_OUTER_H = 8;
-const GAUGE_INSET = 3;
-const GAUGE_INNER_H = GAUGE_OUTER_H - GAUGE_INSET * 2; // 4
-const GAUGE_LERP_RATE = 0.06; // SDLMS uses 0.03 per frame; we lerp per draw call
+const GAUGE_OUTER_W = 52;
+const GAUGE_OUTER_H = 10;
+const FRAME_PX = 1;       // thickness of each of the three frame layers
+const FILL_H = 4;         // inner fill region height (top + bottom accent)
+const FILL_COLOR_H = 3;   // top portion that shows HP-percent color
+const FILL_ACCENT_H = 1;  // bottom accent row
+const FILL_INSET = FRAME_PX * 3; // 3px total frame thickness on each side
+const FILL_W = GAUGE_OUTER_W - FILL_INSET * 2; // 46
+const FILL_Y = FRAME_PX * 3; // y=3, after 3 top frame layers
+
+const COLOR_FRAME_BLACK = 0x000000;
+const COLOR_FRAME_WHITE = 0xffffff;
+const COLOR_ACCENT_DARK = 0x990000; // deeper red, avoids clashing with low-HP fill
+
+// HP bar auto-hide: hide 5s after last hit, with 1.5s fade-out tail.
+const HPBAR_SHOW_MS = 5000;
+const HPBAR_FADE_MS = 1500;
+const HPBAR_VISIBLE_WINDOW = HPBAR_SHOW_MS - HPBAR_FADE_MS; // 3500
 
 export function createMobHpBar() {
   const bar = new Graphics();
@@ -25,44 +37,82 @@ export function createMobHpBar() {
   bar.hitArea = null;
   bar.width = GAUGE_OUTER_W;
   bar.height = GAUGE_OUTER_H;
-  bar._percentDisplayed = 1; // lerp target; starts full
+  bar._lastHp = -1;        // previous hp value, to detect damage
+  bar._hitAt = 0;          // performance.now() timestamp of last detected damage
   return bar;
 }
 
-/** Draw with sdlMS slow-drain: green = actual hp, red = lerp-delayed hp.
- *  All rects drawn centered at x=0 so position.x=0 aligns with mob center. */
+/** Draw the nested-frame HP bar.  All rects centered at x=0.
+ *  Auto-hides 5 seconds after the last hp reduction, with a 1.5s linear fade. */
 export function drawMobHpBar(bar, hp, maxHP) {
+  const now = performance.now();
   bar.clear();
+
+  // Detect a fresh hit: hp decreased since last draw
+  if (bar._lastHp >= 0 && hp < bar._lastHp) {
+    bar._hitAt = now;
+  }
+  bar._lastHp = hp;
+
   if (!maxHP || !hp || hp <= 0 || hp >= maxHP) {
-    // Full or dead — reset lerp state and hide
-    bar._percentDisplayed = hp && maxHP ? hp / maxHP : 1;
     bar.visible = false;
+    bar.alpha = 1;
     return;
   }
+
+  // Decide visibility based on time since last hit
+  const elapsed = now - bar._hitAt;
+  if (bar._hitAt === 0) {
+    // Never been hit — show once damage is detected; do not show brand-new full mob
+    bar.visible = false;
+    bar.alpha = 1;
+    return;
+  }
+  if (elapsed > HPBAR_SHOW_MS) {
+    bar.visible = false;
+    bar.alpha = 1;
+    return;
+  }
+  // Fade-out tail (last HPBAR_FADE_MS)
+  if (elapsed > HPBAR_VISIBLE_WINDOW) {
+    bar.alpha = Math.max(0, 1 - (elapsed - HPBAR_VISIBLE_WINDOW) / HPBAR_FADE_MS);
+  } else {
+    bar.alpha = 1;
+  }
+
   bar.visible = true;
-  const actual = hp / maxHP;
-  // Lerp delayed percent toward actual (sdlMS style slow drain)
-  bar._percentDisplayed = actual + (bar._percentDisplayed - actual) * (1 - GAUGE_LERP_RATE);
-  if (Math.abs(bar._percentDisplayed - actual) < 0.002) bar._percentDisplayed = actual;
+  const pct = hp / maxHP;
+  const cx = -GAUGE_OUTER_W / 2; // gauge center at x=0 of parent
 
-  const innerW = GAUGE_OUTER_W - GAUGE_INSET * 2; // 44
-  const cx = -GAUGE_OUTER_W / 2; // center the gauge at x=0 of its parent
+  // ------- three nested 1px black→white→black frames (as filled rects, not stroke) -------
+  // outer black
+  bar.rect(cx, 0, GAUGE_OUTER_W, FRAME_PX).fill(COLOR_FRAME_BLACK);                              // top
+  bar.rect(cx, GAUGE_OUTER_H - FRAME_PX, GAUGE_OUTER_W, FRAME_PX).fill(COLOR_FRAME_BLACK);      // bottom
+  bar.rect(cx, 0, FRAME_PX, GAUGE_OUTER_H).fill(COLOR_FRAME_BLACK);                             // left
+  bar.rect(cx + GAUGE_OUTER_W - FRAME_PX, 0, FRAME_PX, GAUGE_OUTER_H).fill(COLOR_FRAME_BLACK);  // right
+  // white frame (1px inset)
+  bar.rect(cx + FRAME_PX, FRAME_PX, GAUGE_OUTER_W - FRAME_PX * 2, FRAME_PX).fill(COLOR_FRAME_WHITE);
+  bar.rect(cx + FRAME_PX, GAUGE_OUTER_H - FRAME_PX * 2, GAUGE_OUTER_W - FRAME_PX * 2, FRAME_PX).fill(COLOR_FRAME_WHITE);
+  bar.rect(cx + FRAME_PX, FRAME_PX, FRAME_PX, GAUGE_OUTER_H - FRAME_PX * 2).fill(COLOR_FRAME_WHITE);
+  bar.rect(cx + GAUGE_OUTER_W - FRAME_PX * 2, FRAME_PX, FRAME_PX, GAUGE_OUTER_H - FRAME_PX * 2).fill(COLOR_FRAME_WHITE);
+  // inner black frame (another 1px inset)
+  bar.rect(cx + FRAME_PX * 2, FRAME_PX * 2, GAUGE_OUTER_W - FRAME_PX * 4, FRAME_PX).fill(COLOR_FRAME_BLACK);
+  bar.rect(cx + FRAME_PX * 2, GAUGE_OUTER_H - FRAME_PX * 2 - FRAME_PX, GAUGE_OUTER_W - FRAME_PX * 4, FRAME_PX).fill(COLOR_FRAME_BLACK);
+  bar.rect(cx + FRAME_PX * 2, FRAME_PX * 2, FRAME_PX, GAUGE_OUTER_H - FRAME_PX * 4).fill(COLOR_FRAME_BLACK);
+  bar.rect(cx + GAUGE_OUTER_W - FRAME_PX * 3, FRAME_PX * 2, FRAME_PX, GAUGE_OUTER_H - FRAME_PX * 4).fill(COLOR_FRAME_BLACK);
 
-  // Outer frame
-  bar.roundRect(cx, 0, GAUGE_OUTER_W, GAUGE_OUTER_H, 1.5).fill({ color: 0x1a1a1a, alpha: 0.85 });
-  // Red delayed fill (behind) — width shrinks slowly after hit
-  const delayedW = Math.round(innerW * bar._percentDisplayed);
-  if (delayedW > 0) {
-    bar.rect(cx + GAUGE_INSET, GAUGE_INSET, delayedW, GAUGE_INNER_H).fill(0xff3333);
+  // ------- 46×4 fill region -------
+  const fillX = cx + FILL_INSET; // cx + 3
+  // full black background slot (shows through where HP fill does not reach)
+  bar.rect(fillX, FILL_Y, FILL_W, FILL_H).fill(COLOR_FRAME_BLACK);
+  // bottom 1px dark-red accent (full width, for depth)
+  bar.rect(fillX, FILL_Y + FILL_COLOR_H, FILL_W, FILL_ACCENT_H).fill(COLOR_ACCENT_DARK);
+  // top 3px — HP-percent color fill (width cropped by percent)
+  const colorW = Math.round(FILL_W * pct);
+  if (colorW > 0) {
+    const fillColor = pct > 0.5 ? 0x4dd24d : pct > 0.25 ? 0xffaa33 : 0xff4444;
+    bar.rect(fillX, FILL_Y, colorW, FILL_COLOR_H).fill(fillColor);
   }
-  // Green actual fill (front) — instant
-  const actualW = Math.round(innerW * actual);
-  if (actualW > 0) {
-    const fillColor = actual > 0.5 ? 0x4dd24d : actual > 0.25 ? 0xffaa33 : 0xff4444;
-    bar.rect(cx + GAUGE_INSET, GAUGE_INSET, actualW, GAUGE_INNER_H).fill(fillColor);
-  }
-  // Border
-  bar.roundRect(cx, 0, GAUGE_OUTER_W, GAUGE_OUTER_H, 1.5).stroke({ color: 0x000000, width: 1 });
 }
 
 export function createMobNameLabel(name) {
