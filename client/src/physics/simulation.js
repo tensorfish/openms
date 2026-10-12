@@ -243,6 +243,12 @@ export function applyExternalImpulse(sim, vx, vy, onBeforeImpulse = null) {
   if (!Number.isFinite(vx) || !Number.isFinite(vy)) {
     throw new Error("Invalid external motion impulse");
   }
+  // Climbing characters never get knocked off ladders/ropes by external impulses
+  // (mob body contact, authored hit knockback, skill rushes).  Applying an impulse
+  // here would tear sim.ladder away from the climb animation mid-climb.  The
+  // caller is responsible for damage/flash/fear separately — this gate only
+  // protects the climb state from motion disturbance.
+  if (sim.state === "ladder") return;
   if (onBeforeImpulse !== null) onBeforeImpulse(sim, vx, vy);
   sim.seat = null;
   if (sim.state === "ground") {

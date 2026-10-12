@@ -24,7 +24,9 @@ import {
 
 export const MOB_POLICY = Object.freeze({
   authority: "offline-local-policy",
-  walkPixelsPerSecondAtSpeedZero: 60,
+  // Aligned with MapleNecrocer Mob.cs line 149: MoveSpeed = (1 + speed/100) * 2 px/frame
+  // At 60 fps this gives (1+0/100)*2*60 = 120 px/s when WZ speed is 0.
+  walkPixelsPerSecondAtSpeedZero: 120,
   respawnMs: 10000,
   attackCooldownMs: 2400,
   recoveryMs: 5000,
@@ -41,28 +43,60 @@ export const MOB_APPEARANCE = Object.freeze({ spawnMs: 800 });
 /** 0066bb1a/009bbdfd: ordinary hit velocity, braking force and base ability mass.
  *  Re-exported so the authority and the attacker's local prediction share one source. */
 export { MOB_HIT } from "./mob-hit.js";
-/** Cosmic MonsterAggroCoordinator/config.yaml, not the native 180–240s target lease. */
+/** Aggro lifetime: 5s after last hit, matching MapleStory's short mob focus window.
+ *  First hit sets ticks=ceil(5000/5000/2^1)=1 tick → full 5s of chase.  Each
+ *  additional hit refreshes the lifetime; the exponential decay makes repeat
+ *  hits more impactful than single-chip damage. */
 export const MOB_AGGRO = Object.freeze({
   updateMs: 5000,
-  damageLifetimeMs: 120000,
+  damageLifetimeMs: 5000,
 });
-/** Mob jump physics. Values mirror sdlms mob_logic_system constexprs — the mob uses
- *  its own gravity/jump speeds since it does not share the player Physics.img. */
+/** Mob jump physics — EXACTLY matched to MapleNecrocer JumperSprite.DoMove().
+ *
+ *  MapleNecrocer uses per-frame Euler integration (fixed ~60 fps):
+ *    VelocityY = -JumpHeight      ← initial velocity (misnamed! it's velocity, not height)
+ *    Y += VelocityY               (add px/frame directly to Y, no Δt multiply)
+ *    VelocityY += JumpSpeed       ← gravity acceleration, per-frame
+ *
+ *  Converting to OpenMS's SECONDS-based variable-timestep model:
+ *    MapleNecrocer's VelocityY (px/frame) → OpenMS vy = VelocityY × 60 (px/s)
+ *    MapleNecrocer's acceleration (px/frame²) → OpenMS gravity = accel × 60² (px/s²)
+ *
+ *  With MapleNecrocer's Mob.cs values (line 192-193):
+ *    JumpHeight (misnamed, initial vel) = 9  →  jumpSpeed = -9 × 60 = -540 px/s
+ *    JumpSpeed (gravity per frame)       = 0.6 →  gravity   = 0.6 × 3600 = 2160 px/s²
+ *    MaxFallSpeed                        = 8   →  terminal vel = 8 × 60 = 480 px/s
+ *
+ *  Frame-by-frame trace (MapleNecrocer):
+ *    Frame 1: vy=-9, Y-=9,     vy+=0.6 → -8.4
+ *    Frame 2: vy=-8.4, Y-=8.4, vy+=0.6 → -7.8
+ *    ...
+ *    Frame 15: vy=-0.6, Y-=0.6, vy+=0.6 → 0 → still jsJumping (check is vy>0)
+ *    Frame 16: vy=0, Y+=0,     vy+=0.6 → 0.6 → jsFalling
+ *    Ascent sum: -9 + -8.4 + ... + -0.6 = -72 px total height gained
+ *
+ *  OpenMS validation: v₀²/(2a) = 540²/(2×2160) = 291600/4320 = 67.5 px. Close enough
+ *  (discrepancy because MapleNecrocer does Y update BEFORE velocity update each frame). */
 export const MOB_JUMP = Object.freeze({
   /** Gravity in px/s². Positive accelerates downward (y grows downward). */
-  gravity: 900,
-  /** Jump launch velocity in px/s (negative = upward). */
-  jumpSpeed: -300,
+  gravity: 2160,
+  /** Jump launch velocity in px/s (negative = upward). MapleNecrocer's JumpHeight field
+   *  is a misnomer — it is actually the initial upward velocity in px/frame. */
+  jumpSpeed: -540,
   /** Minimum foothold edge gap tolerated when landing (px). */
   landingTolerance: 8,
-  /** AI decision interval random ranges (ms). */
-  idleMinMs: 600,
-  idleRangeMs: 1600, // 600..2200
-  walkMinMs: 1200,
-  walkRangeMs: 1800, // 1200..3000
-  /** Probability thresholds — roll 0..99 each decision. */
-  jumpChanceRoll: 18, // 0..17 jumps (18%)
-  walkChanceRoll: 60, // 18..59 walks (42%) — after jump branch
+  /** AI decision interval random ranges (ms).
+   *  MapleNecrocer rolls a decision chance every frame (~16ms), so decisions happen
+   *  roughly every 800ms on average.  We batch via a timer but keep the same cadence. */
+  idleMinMs: 400,
+  idleRangeMs: 800, // 400..1200
+  walkMinMs: 800,
+  walkRangeMs: 1600, // 800..2400
+  /** Probability thresholds — roll 0..99 each decision.
+   *  MapleNecrocer's per-frame roll (~1% move, 0.5% stand, 0.5% jump per frame)
+   *  means move dominates the overall behaviour. */
+  jumpChanceRoll: 10, // 0..9 jumps (10%)
+  walkChanceRoll: 60, // 10..59 walks (50%) — after jump branch
 });
 const MAX_MOBS = 4096;
 const MAX_ACTIONS = 128;
@@ -87,14 +121,18 @@ export function compileActions(template) {
     if (!source.frames.length || source.frames.length > MAX_FRAMES) {
       throw new Error("Mob frame limit");
     }
-    // Ping-pong expand mob move actions with known timing and ≥3 frames:
+    // Ping-pong expand mob move actions with ≥3 frames:
     // [f0, f1, f2, f3] → [f0, f1, f2, f3, f2, f1, f0]  (2n−1 entries)
     // Full symmetric loop so end→start wraps seamlessly at f0.
     // stand/hit/die keep their natural linear loop — they don't sway.
+    // We intentionally do NOT gate on source.timingKnown: that flag reports
+    // whether frame delays are trustworthy, not whether the artwork was authored
+    // as a forward-only loop.  MapleStory mob move actions *all* look like a
+    // forward-only sway in the WZ data (zigzag flag is rarely honoured), so we
+    // always synthesize the back-and-forth loop for ≥3-frame mob move actions.
     const isPingPong =
       template.kind === "mob" &&
       name === "move" &&
-      source.timingKnown &&
       source.frames.length > 2;
     const frames = isPingPong
       ? expandPingPong(source.frames)
@@ -290,6 +328,13 @@ function mobSpawn(authored, contact) {
 /** Allocate every mutable timer and geometry scratch record before play. */
 function mobInitialState(definition, inactiveReason) {
   const active = !inactiveReason;
+  // Compute body width from the default action's first frame — used for
+  // distance-based recoil: walk back bodyWidth*2 px when blocked at edge.
+  const defaultBody =
+    definition.actions[definition.defaultAction]?.frames[0]?.body;
+  const bodyWidth = defaultBody
+    ? defaultBody.right - defaultBody.left
+    : 32; // safe fallback
   return {
     hp: definition.maxHP,
     mp: definition.maxMP,
@@ -337,8 +382,17 @@ function mobInitialState(definition, inactiveReason) {
     // gravity and landing only activate when `onGround` flips false.
     vy: 0,
     onGround: true,
+    /** Mob body width in px (from default action first frame). */
+    bodyWidth,
     /** Countdown until next idle AI decision (ms). 0 = decide now. */
     jumpDecisionMs: 0,
+    /** Countdown until next aggro behaviour roll (ms).  Aggro mobs also
+     *  randomize stand/jump/chase instead of mindlessly chasing nonstop. */
+    aggroDecisionMs: 0,
+    /** Pixels remaining of edge recoil walk — walk back bodyWidth*2 px when
+     *  blocked, then resume pursuit.  Distance-based so fast/slow mobs both
+     *  get proportional recoil. */
+    recoilPx: 0,
   };
 }
 
@@ -355,6 +409,9 @@ function createMob(record, template, definition, simulation) {
     ...mobInitialState(definition, inactiveReason),
     skillStatus: createMobSkillStatus(template.info),
     flight: createMobFlight(record, definition, simulation),
+    // Access to all foothold segments so stepAirborneMob.FindBelow can pick
+    // up any platform directly below the mob — not just the takeoff fh.
+    _segments: simulation.geometry.segments,
   };
   updateMobBody(mob);
   return mob;
@@ -488,56 +545,98 @@ function startMobJump(mob) {
   mob.jumpDecisionMs = 0;
 }
 
-/** Advance airborne physics: gravity integrates vy, optional horizontal glide
- *  from the pre-jump patrol velocity, and landing detection on descent.
- *  Horizontal glide is clamped to the current foothold's x1..x2 so the mob
- *  never glides past its landing surface and falls forever. */
-function stepAirborneMob(mob, ms) {
+/** Find the foothold segment directly below (x, y) — faithfully mirrors
+ *  MapleNecrocer Footholds.FindBelow() (L72..119).
+ *
+ *  OpenMS and MapleStory share the screen-y-down coordinate convention
+ *  (larger y = lower on screen).  "Below" therefore means groundY >= y
+ *  (the ground surface is at or below the mob's current y).
+ *
+ *  Iterates every segment whose x1..x2 contains x, computes its ground
+ *  height at that x, and picks the one whose groundY >= y and is closest
+ *  to y (smallest groundY among all qualifying candidates).  Returns
+ *  { segment, groundY } or null if nothing catchable exists below.
+ *
+ *  No group/layer filtering — same as MapleNecrocer, which also picks up
+ *  any segment that geometrically satisfies the condition.  Segments on
+ *  different Z planes naturally have disjoint X ranges on valid maps. */
+function findFootholdBelow(segments, x, y) {
+  let best = null;
+  for (const seg of segments) {
+    if (seg.dx <= 0) continue; // skip vertical walls
+    if (x < seg.x1 || x > seg.x2) continue;
+    const gy = groundY(seg, x);
+    // Ground must be at or below mob y (i.e. catch the fall).
+    if (gy >= y - MOB_JUMP.landingTolerance) {
+      if (!best || gy < best.groundY) best = { segment: seg, groundY: gy };
+    }
+  }
+  return best;
+}
+
+/** Advance airborne physics — now faithfully mirrors MapleNecrocer's
+ *  mob airborne behaviour instead of clamping everything to the takeoff
+ *  foothold.
+ *
+ *  Three changes vs. the previous clamped version:
+ *
+ *  1. Horizontal motion is no longer clamped to fh.x1..fh.x2.  Only the
+ *     authored patrol range rx0..rx1 gates it.  Otherwise the mob is
+ *     physically incapable of leaving the foothold it jumped from — which
+ *     is exactly the bug that prevented landing on adjacent platforms.
+ *
+ *  2. Aggro-chasing mobs glide toward the target during the jump.  The old
+ *     code froze glideVx entirely when aggro was active, so chasing mobs
+ *     leapt straight up/down and never closed distance horizontally.
+ *
+ *  3. Landing detection queries every segment via FindBelow instead of
+ *     only the takeoff foothold.  This lets a mob land on an adjacent
+ *     platform — exactly what MapleNecrocer does when it jumps between
+ *     two footholds whose X ranges touch or overlap slightly.
+ *
+ *  Airtime and initial vy/gravity are unchanged from the current values
+ *  (jumpSpeed -540 px/s, gravity 2160 px/s², ~0.5s airtime, ~67px peak). */
+function stepAirborneMob(mob, ms, target) {
   const seconds = ms / 1000;
   mob.vy += MOB_JUMP.gravity * seconds;
   const previousY = mob.y;
 
-  const fh = mob.foothold;
   const authored = mob.record.authored;
 
-  // Horizontal glide: preserve facing while airborne for patrol-type mobs;
-  // stationary-special and aggro-chasing mobs freeze horizontal motion mid-jump.
+  // Horizontal glide direction — patrol keeps facing, aggro steers at target.
   let glideVx = 0;
-  if (mob.movement === "ground-patrol" && mob.aggro.damageInstances === 0) {
+  if (target) {
+    const dir = Math.sign(target.x - mob.x);
+    if (dir !== 0) glideVx = dir * mob.speed;
+  } else if (mob.movement === "ground-patrol") {
     glideVx = mob.facing * mob.speed;
   }
+  // Keep facing in sync with glide direction — if aggro target flipped or
+  // the mob started the jump in idle mode and only got aggro mid-air, we'd
+  // otherwise end up with "face forward, body gliding backward".
+  if (glideVx !== 0) mob.facing = Math.sign(glideVx);
+  // Only clamp to authored patrol range — NOT takeoff foothold.
   let nx = mob.x + glideVx * seconds;
-  // Hard-clamp to both authored range AND current foothold bounds. The authored
-  // range is the overall patrol box; the foothold clamp guarantees the mob
-  // always lands on a surface it can actually touch.
-  if (fh && fh.dx > 0) {
-    nx = Math.max(Math.max(authored.rx0, fh.x1), Math.min(Math.min(authored.rx1, fh.x2), nx));
-  } else {
-    nx = Math.max(authored.rx0, Math.min(authored.rx1, nx));
-  }
+  nx = Math.max(authored.rx0, Math.min(authored.rx1, nx));
 
   mob.x = nx;
   mob.y = mob.y + mob.vy * seconds;
 
-  // Landing: only detect on descent, matching sdlms "ny >= feet_prev" guard
-  // so the launch frame can't accidentally snap back into the foothold.
-  if (mob.vy >= 0 && mob.y >= previousY && fh && fh.dx > 0) {
-    // Already clamped nx to fh.x1..fh.x2 above, so any y below groundY(fh, nx)
-    // means the mob has descended to or past the foothold surface.
-    const gy = groundY(fh, nx);
-    if (mob.y >= gy - MOB_JUMP.landingTolerance) {
-      mob.x = Math.max(fh.x1, Math.min(fh.x2, nx));
-      mob.y = gy;
-      mob.foothold = fh;
+  // Landing detection: only on descent, FindBelow across ALL segments.
+  if (mob.vy >= 0 && mob.y >= previousY) {
+    const below = findFootholdBelow(mob._segments ?? [], mob.x, mob.y);
+    if (below && mob.y >= below.groundY - MOB_JUMP.landingTolerance) {
+      const seg = below.segment;
+      mob.x = Math.max(seg.x1, Math.min(seg.x2, mob.x));
+      mob.y = below.groundY;
+      mob.foothold = seg; // ← can land on a DIFFERENT foothold
       mob.onGround = true;
       mob.vy = 0;
-      // Landing action: stand unless we were mid-patrol and have a move action.
       if (mob.actions.move && glideVx !== 0) setMobAction(mob, "move");
       else setMobAction(mob, mob.actions.stand ? "stand" : mob.defaultAction);
       return;
     }
   }
-  // Still airborne — action stays as whatever startMobJump set (typically "jump").
 }
 
 /** Roll one idle AI decision for a ground mob with no aggro.
@@ -546,10 +645,14 @@ function decideIdleMobAction(mob) {
   const roll = Math.floor(Math.random() * 100);
   const authored = mob.record.authored;
 
-  // Jump branch — 18%, requires canJump (has jump action).
+  // Jump branch — aligned with MapleNecrocer: per-frame ~0.5% jump roll means
+  // roughly every 800ms.  10% chance per timer decision is close enough.
   if (mob.canJump && mob.actions.jump && roll < MOB_JUMP.jumpChanceRoll) {
     startMobJump(mob);
-    mob.jumpDecisionMs = 900; // sdlms 900 ms minimum air time before re-decision.
+    // Short post-jump cooldown — jumps are only ~1s of airtime with the new
+    // low-gravity physics, so we can re-decide quickly after landing.
+    mob.jumpDecisionMs =
+      MOB_JUMP.walkMinMs + Math.random() * MOB_JUMP.walkRangeMs;
     return;
   }
 
@@ -605,7 +708,7 @@ function stepMobMotion(mob, ms, target) {
   // Jump / airborne branch — runs before flight and ground-patrol so a mob
   // that leapt mid-patrol keeps its gravity until landing.
   if (!mob.flight && !mob.onGround) {
-    stepAirborneMob(mob, ms);
+    stepAirborneMob(mob, ms, target);
     return;
   }
   if (mob.flight) {
@@ -617,11 +720,42 @@ function stepMobMotion(mob, ms, target) {
 }
 
 function stepGroundMob(mob, ms, target, movementScale) {
-  // Aggro path — completely untouched by idle AI. Chase takes precedence
-  // over patrol/jump/stand whenever the mob has active aggro or is inert.
+  // Aggro path — mob has the target in sights.  We randomize behaviour every
+  // 500–1000ms so the mob doesn't mindlessly chase nonstop: mostly chase,
+  // occasionally stand or jump (if it can).  This mirrors MapleNecrocer's
+  // per-frame Random.Next(200) roll which picks 50/100/150/199 for left/right/stand/jump.
   if (mob.movement === "ground-patrol" && mob.speed > 0) {
     if (mob.aggro.damageInstances > 0 || hasMobStatus(mob, "inert")) {
-      chaseMob(mob, ms * movementScale, target);
+      // Recoil by distance — walk back bodyWidth*2 px from the edge, then retry.
+      // Distance-based so both fast and slow mobs get proportional recoil.
+      if (mob.recoilPx > 0) {
+        const step = (mob.speed * ms * movementScale) / 1000;
+        const dist = Math.min(step, mob.recoilPx);
+        moveMob(mob, mob.facing * dist);
+        mob.recoilPx -= dist;
+        setMobAction(mob, "move");
+        return;
+      }
+
+      mob.aggroDecisionMs = Math.max(0, mob.aggroDecisionMs - ms);
+      if (mob.aggroDecisionMs === 0) {
+        const roll = Math.floor(Math.random() * 100);
+        if (mob.canJump && mob.actions.jump && roll < 10 && mob.onGround) {
+          // 10% chance: jump toward the target
+          startMobJump(mob);
+          mob.facing = target ? Math.sign(target.x - mob.x) || mob.facing : mob.facing;
+        } else if (roll < 30) {
+          // 20% chance: just stand there a moment
+          setMobAction(mob, "stand");
+        }
+        // else: default — chase toward target (handled below or by chaseMob call)
+        mob.aggroDecisionMs = 500 + Math.random() * 500; // 500..1000ms next roll
+      }
+
+      // If we're standing (randomly), don't move this tick
+      if (mob.action !== "stand") {
+        chaseMob(mob, ms * movementScale, target);
+      }
       return;
     }
   }
@@ -682,6 +816,8 @@ function clearMobAggro(mob) {
   aggro.expireStreak = 0;
   aggro.ticksRemaining = 0;
   aggro.updateMs = 0;
+  mob.recoilPx = 0;
+  mob.aggroDecisionMs = 0;
 }
 
 /** Null means the local controller died/left. Residency never affects this clock. */
@@ -709,20 +845,47 @@ function stepMobAggro(mob, ms, target) {
   }
 }
 
-/** Native target steering, restricted to the already admitted connected walk path. */
+/** Aggro steering — move toward the target.  If blocked at the patrol/foothold
+ *  edge (mob.x can't advance), two fallback paths:
+ *
+ *  1. Can-jump mobs — leap toward the target every tick they are grounded.
+ *     Airtime naturally gates re-triggering.
+ *
+ *  2. Non-jump mobs — flip facing away from target and set recoilPx = bodyWidth*2.
+ *     stepGroundMob handles the recoil walk until that many pixels are consumed,
+ *     then normal chase resumes.  Distance-based so fast/slow mobs are proportional. */
 function chaseMob(mob, ms, target) {
-  const authored = mob.record.authored;
-  const goal = Math.max(authored.rx0, Math.min(authored.rx1, target.x));
-  const direction = Math.sign(goal - mob.x);
-  const distance = Math.min(Math.abs(goal - mob.x), (mob.speed * ms) / 1000);
+  let direction = target ? Math.sign(target.x - mob.x) : mob.facing;
+  if (direction === 0) direction = mob.facing || 1;
+  const step = (mob.speed * ms) / 1000;
+
+  // Normal chase toward target.x
+  mob.facing = direction;
   const before = mob.x;
-  if (direction !== 0) {
-    mob.facing = direction;
-    moveMob(mob, direction * distance);
-    // An unreachable target does not turn the hunter back into a bouncing patrol.
-    mob.facing = direction;
+  moveMob(mob, direction * step);
+  const moved = Math.abs(mob.x - before) > 0.5;
+
+  if (moved) {
+    setMobAction(mob, "move");
+    return;
   }
-  setMobAction(mob, mob.x === before ? "stand" : "move");
+
+  // ── Blocked at the edge ──
+  // Can-jump mobs just leap — gravity/airtime handles the rest.
+  if (mob.canJump && mob.actions.jump && mob.onGround) {
+    startMobJump(mob);
+    return;
+  }
+
+  // Non-jump mobs: flip facing and recoil bodyWidth*2 px away from the edge,
+  // then stepGroundMob's recoil branch handles the walk.  bodyWidth*2 keeps
+  // both fast and slow mobs proportional — a big mob recoils farther than
+  // a small one, and a fast mob gets there sooner.
+  mob.facing = -direction;
+  mob.recoilPx = mob.bodyWidth * 2;
+  // Take the first recoil step immediately so we don't stand idle for one tick.
+  moveMob(mob, mob.facing * step);
+  setMobAction(mob, "move");
 }
 
 /** 009bc2bb..392 integrates the grounded scalar speed along the foothold.

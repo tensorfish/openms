@@ -1293,11 +1293,16 @@ export class OfflineField {
     this.lastKnockbackRoll = impulse.roll;
     this.lastKnockback = impulse.kind;
     if (impulse.kind === "ordinary") {
-      applyHitImpulse(
-        this.simulation,
-        { ...hit, direction: impulse.direction },
-        this.hooks.onExternalImpulse ?? null,
-      );
+      // Climbing characters take damage but do NOT get knocked off ladders/ropes.
+      // The ladder state explicitly freezes horizontal motion; applying an impulse
+      // would tear the player off the climb animation.  Damage still applies above.
+      if (this.simulation.state !== "ladder") {
+        applyHitImpulse(
+          this.simulation,
+          { ...hit, direction: impulse.direction },
+          this.hooks.onExternalImpulse ?? null,
+        );
+      }
     }
   }
 
