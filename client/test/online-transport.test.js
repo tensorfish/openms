@@ -197,6 +197,35 @@ for (const [phase, destination] of [
   });
 }
 
+test("prepare still admits source events and rejects premature destination or unrelated epochs", async () => {
+  const { transport } = connected();
+  const event = (fieldEpoch, eventSeq) =>
+    decodeServer(
+      JSON.stringify({
+        v: 1,
+        type: "event",
+        connectionEpoch: "connection",
+        serverTick: 20,
+        eventSeq,
+        fieldEpoch,
+        event: { kind: "world.portal", actorId: "traveler" },
+      }),
+    );
+  try {
+    await transport.accept(transition("prepare", "destination", 2), 100, 0, 0);
+    await transport.accept(event("source", 3), 100, 0, 0);
+    expect(transport.lastEventSeq).toBe(3);
+    for (const epoch of ["destination", "unrelated"]) {
+      await expect(
+        transport.accept(event(epoch, 4), 100, 0, 0),
+      ).rejects.toThrow("STALE_FIELD");
+    }
+    expect(transport.lastEventSeq).toBe(3);
+  } finally {
+    transport.close();
+  }
+});
+
 test("neutral lifecycle events clear held controls without inventing a movement step", () => {
   const { transport, sent } = connected();
   let clears = 0;

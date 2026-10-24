@@ -1808,13 +1808,21 @@ export class OnlineLogin {
       );
       this.playTitleBgm();
     }
-    if (value.code === "SIGNED_OUT") {
-      this.setStatus("Signed out. Sign in with your server account.");
+    const message = this.disconnectionMessage(value.code, wasHidden);
+    if (message) this.setStatus(message);
+  }
+
+  disconnectionMessage(code, wasHidden) {
+    if (code === "SIGNED_OUT") {
+      return "Signed out. Sign in with your server account.";
+    } else if (["SESSION_EXPIRED", "UNAUTHENTICATED"].includes(code)) {
+      return "Your account session expired. Sign in again to continue.";
+    } else if (code === "RECOVERY_EXHAUSTED" || code === "RECOVERY_TIMEOUT") {
+      return "Connection recovery failed. Sign in again to reconnect.";
     } else if (wasHidden) {
-      this.setStatus(
-        "Connection closed. Sign in again, or press Enter to reconnect.",
-      );
+      return "Connection closed. Sign in again, or press Enter to reconnect.";
     }
+    return null;
   }
 
   resize(width, height) {

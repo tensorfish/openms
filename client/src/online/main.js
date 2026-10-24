@@ -89,6 +89,7 @@ const transport = new OnlineTransport({
   onStatus: status,
   onCommand: recordCommand,
   onPresentationError: report,
+  onTransportError: report,
 });
 const prediction = new OnlinePrediction({
   onInput: sendInput,
@@ -168,6 +169,10 @@ function status(value) {
   if (value.code === "SIGNED_OUT") releaseField();
   login?.status(value);
   ui?.status(value);
+  if (value.status === "recovering") {
+    document.querySelector("#ui-status").textContent =
+      "Connection interrupted. Restoring your character…";
+  }
   inspection?.status(value);
   // Connection teardown resets the clock, so a stale round trip clears itself.
   setProjectPing(value.timing.roundTripMs);

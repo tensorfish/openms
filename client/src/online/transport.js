@@ -14,6 +14,7 @@ import { resource } from "../rendering/stream-validation.js";
 import { sameWorldIdentity } from "../../../shared/world-content.js";
 import { InputJournal } from "./input-journal.js";
 import { TransportPresentation } from "./transport-presentation.js";
+import { TransportRecovery } from "./transport-recovery.js";
 
 const HTTP_BYTES = 1024 * 1024;
 const HTTP_TIMEOUT_MS = 10000;
@@ -118,9 +119,9 @@ function decodeResponse(chunks, length, status, operationId) {
 export class OnlineTransport {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
+    this.initializeLifecycle();
     this.config = null;
     this.status = "disconnected";
-    this.closingCode = null;
     this.retryAfterMs = null;
     this.model = null;
     this.field = null;
@@ -158,7 +159,7 @@ export class OnlineTransport {
     this.deferred = [];
     this.deferredBytes = 0;
     this.draining = false;
-    this.generation = 0;
+    this.recovery = new TransportRecovery(this);
     this.baselines = new MultipartAssembly();
     this.shops = new MultipartAssembly();
     this.clock = new ServerClock();
@@ -166,8 +167,6 @@ export class OnlineTransport {
     this.presentationRetries = 0;
     this.lastMessageAt = 0;
     this.lastResyncAt = -Infinity;
-    this.closed = false;
-    this.revoking = false;
     this.checkTimer = setInterval(this.check.bind(this), 250);
     this.blurHandler = this.neutral.bind(this);
     this.visibilityHandler = this.visibility.bind(this);
@@ -178,8 +177,20 @@ export class OnlineTransport {
     );
   }
 
-  async initialize() {
+  initializeLifecycle() {
+    this.closed = false;
+    this.revoking = false;
+    this.generation = 0;
+    this.intentGeneration = 0;
+    this.closingCode = null;
+    this.lastFailure = null;
+    this.transitionPhase = null;
+    this.unresolvedReceipts = new Map();
+  }
+
+  async initialize(intent = null) {
     const config = await request("/api/v1/config");
+    if (intent !== null) this.checkConnectIntent(intent);
     this.verifyCompiledIdentity(config);
     if (!validConfig(config)) throw failure("INVALID_CONFIG");
     if (config.worldContent) resource(config.worldContent);
@@ -246,6 +257,10 @@ export class OnlineTransport {
     ) {
       throw failure("INVALID_SESSION");
     }
+    this.recovery.cancel();
+    this.intentGeneration++;
+    this.unresolvedReceipts.clear();
+    if (this.socket) this.disconnected("SESSION_REPLACED");
     this.config = freezeView({ ...this.config, ...session });
   }
 
@@ -302,6 +317,8 @@ export class OnlineTransport {
   /** Sign out the browser session; the account form owns the returned state. */
   async revoke() {
     if (!this.config || typeof this.config.csrfToken !== "string") return;
+    this.recovery.cancel();
+    this.intentGeneration++;
     this.revoking = true;
     let reason = "SIGNED_OUT";
     try {
@@ -328,6 +345,7 @@ export class OnlineTransport {
         pending.recoverResolve?.(unknown);
       }
       this.pending.clear();
+      this.unresolvedReceipts.clear();
       this.pendingTravel = 0;
       this.closingCode = null;
     } catch (error) {
@@ -339,8 +357,9 @@ export class OnlineTransport {
     }
   }
 
-  async listCharacters() {
+  async listCharacters(intent = null) {
     const result = await request("/api/v1/characters");
+    if (intent !== null) this.checkConnectIntent(intent);
     if (!Array.isArray(result.characters) || result.characters.length > 64) {
       throw failure("INVALID_CHARACTERS");
     }
@@ -373,21 +392,36 @@ export class OnlineTransport {
   }
 
   /** Credentials are proof-of-work gated in login()/register(); entry needs only a character. */
-  async connect({ characterId } = {}) {
+  async connect({ characterId } = {}, recovery = null) {
     if (this.closed) throw failure("TRANSPORT_CLOSED");
     if (this.socket || this.status === "connecting") {
       throw failure("ALREADY_CONNECTED");
     }
-    await this.initialize();
-    await this.listCharacters();
-    this.selectCharacter(characterId);
+    if (!recovery) this.recovery.cancel();
+    const intent = ++this.intentGeneration;
     try {
-      return await this.open();
+      await this.initialize(intent);
+      this.checkConnectIntent(intent, recovery);
+      await this.listCharacters(intent);
+      this.checkConnectIntent(intent, recovery);
+      this.selectCharacter(characterId);
+      return await this.open(intent);
     } catch (error) {
-      if (!this.socket) {
+      if (!this.socket && intent === this.intentGeneration) {
         this.setStatus("disconnected", error.code ?? error.message);
       }
       throw error;
+    }
+  }
+
+  checkConnectIntent(intent, recovery = null) {
+    if (
+      this.closed ||
+      this.revoking ||
+      intent !== this.intentGeneration ||
+      (recovery && !this.recovery.owns(recovery))
+    ) {
+      throw failure("CANCELLED");
     }
   }
 
@@ -404,6 +438,11 @@ export class OnlineTransport {
       throw failure("UNRESOLVED_OPERATIONS");
     }
     if (this.characterId !== selected) {
+      this.unresolvedReceipts.clear();
+      if (this.recovery.pending) {
+        this.recovery.cancel();
+        this.intentGeneration++;
+      }
       this.playSession = null;
       this.lastEventSeq = 0;
       for (const domain of Object.keys(this.revisions)) {
@@ -419,13 +458,14 @@ export class OnlineTransport {
     return this.connect({ characterId: this.characterId });
   }
 
-  async open() {
+  async open(intent = this.intentGeneration) {
     const generation = ++this.generation;
     this.setStatus("connecting");
     const { ticket } = await request("/api/v1/play-ticket", "POST", {
       characterId: this.characterId,
       csrfToken: this.config.csrfToken,
     });
+    this.checkConnectIntent(intent);
     if (!/^[A-Za-z0-9_-]{43}$/.test(ticket)) throw failure("INVALID_TICKET");
     if (generation !== this.generation || this.closed) {
       throw failure("CANCELLED");
@@ -458,8 +498,15 @@ export class OnlineTransport {
       socket.addEventListener("message", (event) => {
         if (this.socket === socket) this.receive(event);
       });
-      socket.addEventListener("close", () => {
-        if (this.socket === socket) this.disconnected("CONNECTION_LOST");
+      socket.addEventListener("close", (event) => {
+        if (this.socket === socket) {
+          this.disconnected(
+            event.code === 1012 && event.reason === "RESYNC_REQUIRED"
+              ? event.reason
+              : "CONNECTION_LOST",
+            { stage: "socket-close", closeCode: event.code },
+          );
+        }
       });
       socket.addEventListener("error", () => {
         if (this.socket === socket) this.fail(failure("SOCKET_ERROR"));
@@ -493,7 +540,7 @@ export class OnlineTransport {
     try {
       socket.send(JSON.stringify(decodeClient(JSON.stringify(hello))));
     } catch (error) {
-      this.fail(error);
+      this.fail(error, "hello");
     }
   }
 
@@ -517,6 +564,7 @@ export class OnlineTransport {
     this.queueBytes = 0;
     this.resyncing = false;
     this.expectedFieldEpoch = null;
+    this.transitionPhase = null;
     this.clock.reset();
     this.lastResyncAt = -Infinity;
   }
@@ -551,7 +599,7 @@ export class OnlineTransport {
       this.queueBytes += bytes;
       if (!this.draining) void this.drain();
     } catch (error) {
-      this.fail(error);
+      this.fail(error, "receive");
     }
   }
 
@@ -571,7 +619,7 @@ export class OnlineTransport {
         if (generation !== this.generation) break;
       }
     } catch (error) {
-      if (generation === this.generation) this.fail(error);
+      if (generation === this.generation) this.fail(error, "drain");
     } finally {
       this.draining = false;
     }
@@ -693,7 +741,10 @@ export class OnlineTransport {
       throw failure("INVALID_LIMITS");
     }
     this.connectionEpoch = message.connectionEpoch;
-    if (this.playSession !== message.playSession) this.inputSeq = 0;
+    if (this.playSession !== message.playSession) {
+      this.inputSeq = 0;
+      this.lastEventSeq = 0;
+    }
     this.playSession = message.playSession;
     this.expectedFieldEpoch = message.fieldEpoch;
     this.serverTick = message.serverTick;
@@ -741,6 +792,7 @@ export class OnlineTransport {
     if (generation !== this.generation) return;
     this.publishModel(frozen);
     this.restoreInteractionRevisions(frozen);
+    this.releaseRetiredTravel();
     this.baselineId = model.snapshotId;
     this.baselineReceivedAt = performance.now();
     this.lastEventSeq = model.eventSeq;
@@ -911,6 +963,9 @@ export class OnlineTransport {
   }
 
   result(message) {
+    if (this.unresolvedReceipts.delete(message.operationId)) {
+      this.rememberResult(message);
+    }
     const pending = this.pending.get(message.operationId);
     if (pending) {
       this.rememberResult(message);
@@ -938,6 +993,7 @@ export class OnlineTransport {
     if (message.sourceEpoch !== this.expectedFieldEpoch) {
       throw failure("STALE_FIELD");
     }
+    this.transitionPhase = message.phase;
     if (message.phase === "prepare") {
       this.inputJournal.clear();
       this.setStatus("transitioning");
@@ -1090,6 +1146,7 @@ export class OnlineTransport {
 
   /** Pace buffered input without changing its identity or its original target tick. */
   flushInputs() {
+    if (this.recoverClosedSocket()) return;
     const clock = this.clock;
     if (!this.inputReady(clock)) return;
     this.inputWindow(clock);
@@ -1117,6 +1174,7 @@ export class OnlineTransport {
         attack: sample.attack,
         ...(sample.motion ? { motion: sample.motion } : {}),
       });
+      this.recovery.input();
       this.inputTokens--;
       this.inputJournal.shift();
     }
@@ -1241,6 +1299,7 @@ export class OnlineTransport {
       void this.sendDevelopment(pending);
       return;
     }
+    if (this.recoverClosedSocket()) return;
     const cast = this.pending.get(pending.controlAfter);
     if (cast && cast.sentEpoch !== this.connectionEpoch) return;
     const now = performance.now();
@@ -1255,13 +1314,60 @@ export class OnlineTransport {
         this.nextCommandAt = now + 1000 / this.limits.commandPerSecond;
       }
     } catch (error) {
-      this.fail(error);
+      this.fail(error, "command");
     }
   }
 
   recoverPending() {
     for (const pending of this.pending.values()) {
+      // Input flushing or an earlier send can begin recovery during this pass.
+      if (this.status !== "active") return;
       if (pending.sentEpoch !== this.connectionEpoch) this.sendPending(pending);
+    }
+  }
+
+  /** A new actor cannot replay a mixed durable/tutorial portal safely. Its full
+   * baseline releases presentation reservations, while the receipt stays unknown. */
+  releaseRetiredTravel() {
+    for (const [operationId, pending] of this.pending) {
+      if (
+        pending.durable ||
+        pending.fields.action.kind !== "portal.enter" ||
+        pending.playSession === this.playSession
+      ) {
+        continue;
+      }
+      const outcome = freezeView({
+        type: "operation",
+        operationId,
+        status: "unknown",
+        code: "OPERATION_EXPIRED",
+      });
+      const retained = Object.freeze({
+        fields: freezeView(structuredClone(pending.fields)),
+        result: outcome,
+      });
+      this.unresolvedReceipts.set(operationId, retained);
+      if (this.unresolvedReceipts.size > MAX_PENDING) {
+        this.unresolvedReceipts.delete(
+          this.unresolvedReceipts.keys().next().value,
+        );
+      }
+      this.rememberResult(outcome);
+      this.pending.delete(operationId);
+      if (pending.travel) this.pendingTravel--;
+      pending.resolve(outcome);
+      pending.recoverResolve?.(outcome);
+      this.rejectRetiredDependents(operationId);
+    }
+  }
+
+  /** These child intentions never left the browser and depended on an unknown turn. */
+  rejectRetiredDependents(operationId) {
+    for (const pending of this.pending.values()) {
+      if (!pending.bound && pending.predecessor === operationId) {
+        this.rejectUnsent(pending, "OPERATION_EXPIRED");
+      }
     }
   }
 
@@ -1439,6 +1545,7 @@ export class OnlineTransport {
   }
 
   resync(reason = "prediction-overflow") {
+    if (this.recoverClosedSocket()) return;
     if (
       !this.connectionEpoch ||
       !this.lastEventSeq ||
@@ -1456,6 +1563,24 @@ export class OnlineTransport {
     });
   }
 
+  /** Native close state can precede its queued event after a frozen page wakes. */
+  recoverClosedSocket() {
+    if (
+      !this.socket ||
+      this.socket.readyState < WebSocket.CLOSING ||
+      !this.characterId ||
+      !this.playSession ||
+      !this.model ||
+      !this.config ||
+      this.closed ||
+      this.revoking
+    ) {
+      return false;
+    }
+    this.disconnected("CONNECTION_LOST");
+    return true;
+  }
+
   neutral() {
     // Every input now proves a complete local quantum. Visibility/blur clears the
     // native held state; no synthetic, unstepped packet may consume a path tick.
@@ -1464,11 +1589,13 @@ export class OnlineTransport {
 
   visibility() {
     if (globalThis.document?.hidden) this.neutral();
+    else this.recovery.advance();
   }
 
   check() {
     const now = performance.now();
     try {
+      this.recovery.advance(now);
       this.baselines.check(now);
       this.shops.check(now);
       this.recoverPresentation(now);
@@ -1497,22 +1624,31 @@ export class OnlineTransport {
         }
       }
     } catch (error) {
-      this.fail(error);
+      this.fail(error, "check");
     }
   }
 
   setStatus(status, code) {
-    this.status = this.revoking ? "signing-out" : status;
+    if (status === "active" && this.recovery.pending) this.recovery.ready();
+    this.status = this.revoking
+      ? "signing-out"
+      : this.recovery.pending
+        ? "recovering"
+        : status;
     this.callbacks.onStatus?.({ ...this.snapshot(), code });
   }
 
-  fail(error) {
-    this.disconnected(error.code ?? error.message ?? "PROTOCOL_ERROR");
+  fail(error, stage = "transport") {
+    this.disconnected(error.code ?? error.message ?? "PROTOCOL_ERROR", {
+      stage,
+      error,
+    });
   }
 
-  disconnected(code) {
+  disconnected(code, context = null) {
     // A closing frame is authoritative for why this connection ended.
     const reason = this.closingCode ?? code;
+    const diagnostic = this.disconnectionFailure(reason, context);
     this.closingCode = null;
     const socket = this.socket;
     this.socket = null;
@@ -1525,10 +1661,56 @@ export class OnlineTransport {
     this.openWaiter?.reject(failure(reason));
     this.openWaiter = null;
     this.resetConnection();
-    this.setStatus("disconnected", reason);
+    const recover =
+      !this.closed && !this.revoking && this.recovery.lost(reason);
+    this.retainDisconnection(diagnostic, recover);
+    this.setStatus(
+      recover ? "recovering" : "disconnected",
+      this.recovery.failureCode ?? reason,
+    );
+    this.reportTerminalDisconnection(diagnostic, recover, context);
+  }
+
+  retainDisconnection(diagnostic, recover) {
+    if (!diagnostic) return;
+    diagnostic.code = this.recovery.failureCode ?? diagnostic.code;
+    diagnostic.recovery = recover;
+    this.lastFailure = Object.freeze(diagnostic);
+  }
+
+  reportTerminalDisconnection(diagnostic, recover, context) {
+    if (diagnostic && !recover) {
+      this.callbacks.onTransportError?.(
+        context?.error ?? failure(diagnostic.code),
+      );
+    }
+  }
+
+  /** One credential-free diagnostic survives connection reset and bounded event history. */
+  disconnectionFailure(code, context) {
+    if (
+      this.closed ||
+      this.revoking ||
+      ["DISCONNECTED", "SIGNED_OUT", "SESSION_REPLACED"].includes(code)
+    ) {
+      return null;
+    }
+    return {
+      code: /^[A-Z_]{1,80}$/.test(code) ? code : "CLIENT_ERROR",
+      at: Date.now(),
+      mapId: this.field?.mapId ?? null,
+      fieldEpoch: this.expectedFieldEpoch,
+      phase: this.transitionPhase ?? this.status,
+      stage: context?.stage ?? "transport",
+      closeCode: context?.closeCode ?? null,
+      serverTick: this.serverTick,
+      lastEventSeq: this.lastEventSeq,
+    };
   }
 
   disconnect() {
+    this.recovery.cancel();
+    this.intentGeneration++;
     this.neutral();
     this.disconnected("DISCONNECTED");
   }
@@ -1559,11 +1741,13 @@ export class OnlineTransport {
       inputSeq: this.inputSeq,
       timing: this.clock.snapshot(),
       pendingOperations: this.pending.size,
+      unresolvedOperations: this.unresolvedReceipts.size,
       queuedMessages: this.queue.length + this.deferred.length,
       queuedBytes: this.queueBytes + this.deferredBytes,
       presentationMessages: this.renderer.queue.length,
       presentationBytes: this.renderer.bytes,
       bufferedBytes: this.socket?.bufferedAmount ?? 0,
+      lastFailure: this.lastFailure,
     });
   }
 }

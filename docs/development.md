@@ -374,3 +374,23 @@ flowchart TD
 | PostgreSQL                                                            | Accounts, character progress, transactions, Studio revisions/uploads and world releases; also the registered asset catalog |
 
 Original artwork stays in generated files. The server reads gameplay definitions from that generated package, combines them with the active custom world release from PostgreSQL, and controls online dialogue, movement, rewards and transactions. The client sends inputs and choices, renders the server's responses, and fetches original visuals from the frontend. [Reference data](#definitions) explains why the current extraction packages both visuals and gameplay data.
+
+## Connection recovery
+
+Recoverable socket loss retains the selected character and pending operation IDs,
+waits while the page is hidden, and automatically reuses authenticated entry when
+execution resumes. Recovery allows three attempts within a 180 s window starting
+when foreground recovery begins; ten seconds of sustained movement input resets the
+incident budget. Expired
+authentication or exhausted recovery returns to sign-in with an explicit reason.
+
+After a fresh play session, a complete authoritative baseline releases old portal
+travel reservations and archives their unknown receipts within a bounded collection.
+It neither replays the portal script nor infers whether it committed. Durable
+transaction recovery keeps its existing envelopes and retry policy.
+
+For an unexpected return to sign-in, retain the bounded `lastFailure` record from
+Diagnostics → Connection → Technical observation. It survives connection reset and
+includes the failure code, map, transition phase and receiving stage without
+credentials. The development proxy forwards WebSocket close codes and bounded
+reasons; its logs retain only recognized reason codes.
