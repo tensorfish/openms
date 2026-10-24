@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { publishFile } from "./atlas.js";
 
 /** Publish completed compilation artifacts only after source and content identity rechecks. */
@@ -11,8 +11,29 @@ export async function publishBrowserOutputs(outputs) {
   }
 }
 
+/** Deployment URLs are canonical site paths, never filesystem paths or traversal. */
+function deploymentFilename(site, url) {
+  if (
+    !/^(?:\/[A-Za-z0-9_~.-]+)+$/.test(url) ||
+    url.split("/").some((part) => part === "." || part === "..")
+  ) {
+    throw new Error(`Invalid deployment resource URL: ${url}`);
+  }
+  const filename = resolve(site, url.slice(1));
+  const inside = relative(site, filename);
+  if (
+    !inside ||
+    inside === ".." ||
+    inside.startsWith(`..${sep}`) ||
+    isAbsolute(inside)
+  ) {
+    throw new Error(`Invalid deployment resource URL: ${url}`);
+  }
+  return filename;
+}
+
 async function emit(site, url, bytes) {
-  const filename = resolve(site, `.${url}`);
+  const filename = deploymentFilename(site, url);
   await mkdir(dirname(filename), { recursive: true });
   await publishFile(filename, bytes);
   return {
@@ -30,7 +51,7 @@ export async function emitOnlineDeployment(root, build) {
     resources.push(await emit(site, url, bytes));
   }
   for (const output of build.outputs) {
-    const name = output.path.slice(output.path.lastIndexOf("/") + 1);
+    const name = posix.basename(output.path.replaceAll("\\", "/"));
     const bytes = new Uint8Array(await output.arrayBuffer());
     resources.push(await emit(site, `/dist/online/${name}`, bytes));
     if (name === "atlas-worker.js" || name === "audio-capture-worklet.js") {

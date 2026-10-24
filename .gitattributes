@@ -1,0 +1,5 @@
+# Vendored compiler inputs are byte-verified against their provenance manifests.
+# Preserve original bytes when Windows Git uses core.autocrlf=true.
+infra/gameplay-definitions/** -text
+infra/sql/tables/** -text
+infra/sql/data/** -text
