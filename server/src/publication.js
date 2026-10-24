@@ -115,6 +115,8 @@ export class Publications {
       socket.data.ackSnapshotId = null;
       socket.data.snapshotEpoch = actor.field.epoch;
       socket.data.ready = false;
+      socket.data.readyDeadlineAt =
+        Date.now() + PROTOCOL.ASSET_PREPARATION_TIMEOUT_MS;
     }
     this.offer(socket, snapshotId, eventSeq);
     socket.data.offeredSnapshotId = snapshotId;

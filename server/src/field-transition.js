@@ -210,6 +210,7 @@ function beginTransition(world, actor, request) {
     transition.sourceReadiness = {
       connection: actor.connection,
       ready: data.ready,
+      readyDeadlineAt: data.readyDeadlineAt,
       transfer: data.transfer,
     };
     data.transfer = {
@@ -413,6 +414,9 @@ function publishTransition(world, actor, transition) {
       deadline,
       code: "OK",
     });
+    // Binding restores inherited visuals/voices before this packet; its first
+    // destination baseline carries that state without pre-commit publications.
+    actor.skills.resources.enablePublication();
   } else {
     world.broadcast(source, {
       type: "event",
@@ -443,6 +447,7 @@ function restoreSourceReadiness(actor, transition) {
   const previous = transition.sourceReadiness;
   if (!previous || actor.connection !== previous.connection) return;
   actor.connection.data.ready = previous.ready;
+  actor.connection.data.readyDeadlineAt = previous.readyDeadlineAt;
   actor.connection.data.transfer = previous.transfer;
 }
 
@@ -473,6 +478,7 @@ function resetReadiness(actor) {
   data.baselines.clear();
   data.ackSnapshotId = null;
   data.ready = false;
+  data.readyDeadlineAt = Date.now() + PROTOCOL.ASSET_PREPARATION_TIMEOUT_MS;
 }
 
 async function tutorialPortal(world, actor, portal) {

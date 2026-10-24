@@ -126,6 +126,39 @@ test("production motion diagnostics preserve numeric evidence and exclude payloa
   });
 });
 
+test("production movement expiry retains bounded readiness and clock evidence", () => {
+  const lines = [];
+  const log = createServerLog(false, { write: (line) => lines.push(line) });
+  log("movement.expired", {
+    character: "actor",
+    map: 922020300,
+    fieldTick: 129,
+    startedTick: 0,
+    steps: 0,
+    ready: true,
+    state: "active",
+    inputAgeTicks: 129,
+    heartbeatAgeMs: 450,
+    password: "secret",
+  });
+  log("private.event", { character: "actor" });
+
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).not.toContain("secret");
+  const fields = JSON.parse(lines[0].slice(lines[0].indexOf("{")));
+  expect(fields).toEqual({
+    character: "actor",
+    map: 922020300,
+    fieldTick: 129,
+    startedTick: 0,
+    steps: 0,
+    ready: true,
+    state: "active",
+    inputAgeTicks: 129,
+    heartbeatAgeMs: 450,
+  });
+});
+
 test("development server logging retains routine events", () => {
   const lines = [];
   const log = createServerLog(true, { write: (line) => lines.push(line) });

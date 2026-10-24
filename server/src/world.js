@@ -158,6 +158,37 @@ function resumableResume(actor, motion) {
   );
 }
 
+function inputAgeTicks(actor, tick) {
+  if (
+    !Number.isSafeInteger(actor.lastInputTick) ||
+    !Number.isSafeInteger(tick)
+  ) {
+    return undefined;
+  }
+  return Math.max(0, tick - actor.lastInputTick);
+}
+
+function heartbeatAgeMs(actor) {
+  const pongAt = actor.connection?.data?.pongAt;
+  if (!Number.isFinite(pongAt)) return undefined;
+  return Math.max(0, Date.now() - pongAt);
+}
+
+function movementExpiryDetails(actor) {
+  const tick = actor.field?.tick;
+  return {
+    character: actor.id,
+    map: actor.field?.mapId,
+    fieldTick: tick,
+    startedTick: actor.movementStream?.startedTick,
+    steps: actor.movementStream?.steps,
+    ready: actor.connection?.data?.ready ?? null,
+    state: actor.state,
+    inputAgeTicks: inputAgeTicks(actor, tick),
+    heartbeatAgeMs: heartbeatAgeMs(actor),
+  };
+}
+
 function activationOperation(actor) {
   return {
     operationId: randomUUID(),
@@ -621,6 +652,7 @@ export class OnlineWorld {
 
   /** Exhausted movement time is a recoverable connection failure, not cheat evidence. */
   expireMovement(actor) {
+    this.log?.("movement.expired", movementExpiryDetails(actor));
     this.neutralize(actor);
     this.publish(actor, {
       type: "closing",

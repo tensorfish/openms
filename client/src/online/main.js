@@ -344,7 +344,7 @@ async function loadScene(snapshot, descriptor, loadingOwner, signal) {
     viewport: app.screen,
     intent,
   });
-  const cancel = () => candidate.controller.abort(signal.reason);
+  const cancel = () => candidate.destroy();
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     signal?.throwIfAborted();

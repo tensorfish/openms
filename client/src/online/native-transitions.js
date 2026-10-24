@@ -82,20 +82,12 @@ export class NativeTransitions {
       this.acceptPart(active, message);
       const preparation = await partsReady.promise;
       if (!preparation || this.active !== active) return;
-      active.candidate = await this.stage(
+      const candidate = await this.stage(
         message,
         active.controller.signal,
         preparation,
       );
-      if (!(await boundary.covered) || this.active !== active) return;
-      if (source !== this.owner.hooks.scene()) {
-        throw new Error("Transition source changed during preparation");
-      }
-      this.owner.transport.sendTransitionReady(
-        message.transitionId,
-        true,
-        message.sourceEpoch,
-      );
+      await this.confirmCandidate(active, candidate, boundary, source);
     } catch (error) {
       if (this.active !== active) return;
       this.fail();
@@ -106,6 +98,22 @@ export class NativeTransitions {
       );
       this.owner.report(error);
     }
+  }
+  async confirmCandidate(active, candidate, boundary, source) {
+    if (this.active !== active) {
+      candidate.destroy();
+      return;
+    }
+    active.candidate = candidate;
+    if (!(await boundary.covered) || this.active !== active) return;
+    if (source !== this.owner.hooks.scene()) {
+      throw new Error("Transition source changed during preparation");
+    }
+    this.owner.transport.sendTransitionReady(
+      active.message.transitionId,
+      true,
+      active.message.sourceEpoch,
+    );
   }
   async stage(message, signal, preparation) {
     const changingMap =
@@ -148,7 +156,10 @@ export class NativeTransitions {
       viewport: this.owner.app.screen,
       intent: (action) => this.owner.request(action),
     });
+    const cancel = () => candidate.destroy();
+    signal.addEventListener("abort", cancel, { once: true });
     try {
+      signal.throwIfAborted();
       const snapshot = this.preparationSnapshot(message, preparation);
       await candidate.prepare(snapshot);
       await candidate.setNativePresentation(this.owner.quests);
@@ -157,6 +168,8 @@ export class NativeTransitions {
     } catch (error) {
       candidate.destroy();
       throw error;
+    } finally {
+      signal.removeEventListener("abort", cancel);
     }
   }
   /** The staged self is artwork-only. Main never installs it into prediction or the transport model. */

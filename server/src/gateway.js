@@ -106,6 +106,7 @@ export class GameplayGateway {
       createdAt: Date.now(),
       helloPending: false,
       ready: false,
+      readyDeadlineAt: Date.now() + PROTOCOL.ASSET_PREPARATION_TIMEOUT_MS,
       sequence: 0,
       // Allow two seconds of normally paced input to arrive together after a
       // network stall. The sustained limit and field queue remain bounded.
@@ -289,6 +290,8 @@ export class GameplayGateway {
     actor.disconnectedAt = null;
     socket.data.actor = actor;
     socket.data.ready = false;
+    socket.data.readyDeadlineAt =
+      Date.now() + PROTOCOL.ASSET_PREPARATION_TIMEOUT_MS;
   }
 
   welcome(socket, resumed) {
@@ -470,12 +473,17 @@ export class GameplayGateway {
     }
     const becameReady = !socket.data.ready;
     socket.data.ready = true;
+    socket.data.readyDeadlineAt = null;
     socket.data.ackSnapshotId = message.snapshotId;
     socket.data.transfer = null;
     if (socket.data.actor.state === "preparing") {
       socket.data.actor.state = "active";
     }
     if (becameReady) {
+      if (socket.data.actor.movementStream) {
+        resetMovementStream(socket.data.actor);
+        this.publications.motion(socket.data.actor);
+      }
       this.world.participants
         .publish([socket.data.actor.id])
         .catch((error) => this.fail(socket, error));
@@ -577,6 +585,14 @@ export class GameplayGateway {
   heartbeat(socket, now) {
     if (!socket.data.actor && now - socket.data.createdAt > HELLO_TIMEOUT_MS) {
       return this.publications.close(socket, "UNAUTHENTICATED");
+    }
+    if (
+      socket.data.actor &&
+      !socket.data.ready &&
+      socket.data.readyDeadlineAt !== null &&
+      now >= socket.data.readyDeadlineAt
+    ) {
+      return this.publications.close(socket, "TRANSITION_FAILED", 0);
     }
     if (now - socket.data.pongAt > PONG_TIMEOUT_MS) {
       return this.publications.close(socket, "SESSION_EXPIRED");

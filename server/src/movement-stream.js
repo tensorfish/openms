@@ -185,6 +185,7 @@ export function advanceMovementStream(world, actor) {
     advanceDisconnectedMovement(actor);
     return;
   }
+  if (!movementReady(actor)) return;
   if (!movementClockAvailable(world, actor)) return;
   const available = actor.field.tick - stream.startedTick;
   for (let count = 0; count < PROTOCOL.MAX_CATCH_UP; count++) {
@@ -199,6 +200,10 @@ export function advanceMovementStream(world, actor) {
   }
   actor.input.jumpPressed = false;
   actor.input.attackPressed = false;
+}
+
+function movementReady(actor) {
+  return actor.connection?.data?.ready !== false;
 }
 
 /** A slow or stopped client clock is bounded too. Network exhaustion requests

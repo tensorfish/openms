@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { Publications } from "../src/publication.js";
 import { actorEntity } from "../src/field-views.js";
-import { decodeServer, snapshotPartSchema } from "../../shared/protocol.js";
+import {
+  PROTOCOL,
+  decodeServer,
+  snapshotPartSchema,
+} from "../../shared/protocol.js";
 import { validate } from "../../shared/schema.js";
 import { loadContent } from "../src/content.js";
 import { createSimulation } from "../../client/src/physics/simulation.js";
@@ -161,6 +165,43 @@ test("the immediate post-snapshot motion checkpoint is a complete wire record", 
   // requires the divert array the movement contract added.
   expect(frame.diverts).toEqual([]);
   expect(frame.motion).toEqual(captureMotion(simulation));
+});
+
+test("a cross-field baseline starts one readiness deadline that same-field refreshes cannot extend", () => {
+  const actor = {
+    field: { epoch: "destination", tick: 8 },
+    state: "active",
+    eventSeq: 0,
+  };
+  const socket = {
+    data: {
+      actor,
+      epoch: "connection",
+      closed: false,
+      ready: true,
+      snapshotEpoch: "source",
+      readyDeadlineAt: null,
+      baselines: new Map([["old", 1]]),
+    },
+    getBufferedAmount: () => 0,
+    send: () => 1,
+  };
+  actor.connection = socket;
+  const publications = new Publications({
+    snapshot: () => [{ kind: "entities", entities: [] }],
+  });
+  publications.motion = () => {};
+
+  publications.snapshot(actor);
+  const deadline = socket.data.readyDeadlineAt;
+  expect(socket.data.ready).toBe(false);
+  expect(deadline).toBeGreaterThan(Date.now());
+  expect(deadline).toBeLessThanOrEqual(
+    Date.now() + PROTOCOL.ASSET_PREPARATION_TIMEOUT_MS,
+  );
+
+  publications.snapshot(actor);
+  expect(socket.data.readyDeadlineAt).toBe(deadline);
 });
 
 test("an indivisible oversized view and excessive aggregate snapshot remain explicit errors", () => {

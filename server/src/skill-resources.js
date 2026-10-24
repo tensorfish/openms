@@ -117,6 +117,8 @@ export class AuthoritySkillResources extends SkillResources {
     super(scene, hooks);
     this.world = world;
     this.actor = actor;
+    this.publicationField = scene.field ?? actor.field;
+    this.publicationEnabled = actor.bound !== false;
     this.animations = new Map();
     this.bundles = new Map();
     this.frameSources = new WeakMap();
@@ -229,11 +231,17 @@ export class AuthoritySkillResources extends SkillResources {
     });
   }
   emit(event) {
-    this.world.broadcast(this.actor.field, {
+    // A detached destination records its inherited presentation for the first
+    // baseline. Publishing it before travel commits would cross field epochs.
+    if (!this.publicationEnabled) return;
+    this.world.broadcast(this.publicationField, {
       type: "event",
-      fieldEpoch: this.actor.field.epoch,
+      fieldEpoch: this.publicationField.epoch,
       event,
     });
+  }
+  enablePublication() {
+    this.publicationEnabled = true;
   }
   playSequence(sequence, target, options) {
     const slot = super.playSequence(sequence, target, options);
