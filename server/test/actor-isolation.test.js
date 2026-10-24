@@ -29,11 +29,11 @@ function actor(id) {
   };
 }
 
-test("a client's protocol fault in its movement step closes only that client", () => {
+test("a full basic-attack queue preserves movement and the other actors", () => {
   const { world, published, logged } = worldWithLog();
   const spammer = actor("spammer");
   const walker = actor("walker");
-  // Reproduce the 2026-10-04 trigger: more queued attack edges than the bound.
+  // Normal native presses during a long cast can exceed the combat buffer.
   world.moveActor = (target) => {
     if (target !== spammer) {
       target.moved = true;
@@ -51,6 +51,7 @@ test("a client's protocol fault in its movement step closes only that client", (
         targetTick: 100,
       });
     }
+    target.moved = true;
   };
   world.neutralize = (target) => (target.neutralized = true);
 
@@ -58,15 +59,12 @@ test("a client's protocol fault in its movement step closes only that client", (
 
   expect(walker.moved).toBe(true);
   expect(walker.closes).toEqual([]);
-  expect(spammer.neutralized).toBe(true);
-  expect(spammer.closes).toEqual([{ code: 1008, reason: "RATE_LIMITED" }]);
-  expect(published).toEqual([
-    {
-      actor: "spammer",
-      record: { type: "closing", code: "RATE_LIMITED", retryAfterMs: 0 },
-    },
-  ]);
-  expect(logged.map((entry) => entry.event)).toEqual(["actor.rejected"]);
+  expect(spammer.moved).toBe(true);
+  expect(spammer.attackEdges).toHaveLength(8);
+  expect(spammer.attackAdmission).toBe("COOLDOWN");
+  expect(spammer.closes).toEqual([]);
+  expect(published).toEqual([]);
+  expect(logged).toEqual([]);
 });
 
 test("server faults without a protocol code still reach the lifecycle", () => {
