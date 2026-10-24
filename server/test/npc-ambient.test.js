@@ -22,6 +22,17 @@ async function fixture() {
   npc.ambient.cooldownMs = 30;
   return { world, field, npc, messages };
 }
+async function hauntedForestFixture(templateId) {
+  const probe = await fixture();
+  probe.field = await probe.world.fieldFor(682000000);
+  probe.npc = [...probe.field.npcs.values()].find(
+    (entry) => entry.templateId === templateId,
+  );
+  probe.npc.ambient.cooldownMs = 30;
+  // Select the second authored ambient action, after the ordinary "say" action.
+  probe.world.nextUint32 = () => 1;
+  return probe;
+}
 function step(probe, count = 1) {
   for (let index = 0; index < count; index++) {
     probe.field.tick++;
@@ -101,3 +112,21 @@ test("NPC speech fields cannot be attached to monsters or contain unbounded auth
   entity.npcSpeech.lineIndex = 4096;
   expect(() => decodeServer(JSON.stringify(wire(entity)))).toThrow();
 });
+
+for (const [templateId, action] of [
+  [9201142, "wind"],
+  [9201136, "weep"],
+]) {
+  test(`Haunted Forest NPC ${templateId} publishes and restores its authored ${action} action`, async () => {
+    const probe = await hauntedForestFixture(templateId);
+    step(probe);
+    expect(probe.npc.action).toBe(action);
+    const entity = publish(probe, "observer");
+    const decoded = decodeServer(JSON.stringify(wire(entity)));
+    expect(animationName(decoded.changes[0].entity.action)).toBe(action);
+    expect(publish(probe, "late").action).toBe(entity.action);
+    const duration = probe.npc.ambient.actionMs;
+    step(probe, Math.ceil(duration / 30));
+    expect(animationName(publish(probe, "observer").action)).toBe("stand");
+  });
+}

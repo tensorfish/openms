@@ -11,7 +11,7 @@ import {
 } from "./schema.js";
 
 /** Versioned web IDs, not native packet numbers. Body actions from Character.wz:00002000.img
- * and life actions from all 735 maps in the packaged catalog. currency0..3 select
+ * and life actions from all 1005 maps in the packaged catalog. currency0..3 select
  * catalog.ui.dropArtwork.variants; new content names require a rules/build cutover. */
 export const ANIMATION_ACTIONS = Object.freeze([
   "stand1",
@@ -267,6 +267,30 @@ export const ANIMATION_ACTIONS = Object.freeze([
   "windshot",
   "windspear",
   "wink",
+  // Appended for the expanded original map catalog; existing wire IDs stay stable.
+  "scavenger",
+  "gloomy",
+  "caugh",
+  "work",
+  "act3340",
+  "sword",
+  "prayer",
+  "experiment",
+  "hit",
+  "read",
+  "seek",
+  "wind",
+  "wheel",
+  "handup",
+  "die",
+  "weep",
+  "warring",
+  "ear",
+  "tear",
+  "leg",
+  "bong",
+  "potion",
+  "bubble",
 ]);
 const ACTION_IDS = new Map(
   ANIMATION_ACTIONS.map((name, index) => [name, index]),
@@ -276,7 +300,9 @@ if (ACTION_IDS.size !== ANIMATION_ACTIONS.length) {
 }
 export function animationId(name) {
   const id = ACTION_IDS.get(name);
-  if (id === undefined) throw new Error("Unsupported animation action");
+  if (id === undefined) {
+    throw new Error(`Unsupported animation action: ${String(name)}`);
+  }
   return id;
 }
 export function animationName(id) {

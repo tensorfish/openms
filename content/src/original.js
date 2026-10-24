@@ -5,8 +5,12 @@ import { fileURLToPath } from "node:url";
 import {
   catalog as validateCatalog,
   manifest as validateManifest,
+  entries,
+  array,
+  LIMITS,
 } from "../../client/src/rendering/stream-validation.js";
 import { nearestSavedArrival } from "../../client/src/world/field-arrival.js";
+import { animationId } from "../../shared/motion-schema.js";
 
 const REPOSITORY = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
@@ -16,6 +20,25 @@ const MAX_RULE_BYTES = 64 * 1024 * 1024;
 
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Refuse unsupported life actions at map admission, before any field tick uses them. */
+function validateLifeAnimations(manifest) {
+  for (const [, template] of entries(
+    manifest.life.templates,
+    LIMITS.entities,
+  )) {
+    animationId(template.defaultAction);
+    for (const [action] of entries(template.actions, LIMITS.actions)) {
+      animationId(action);
+    }
+    for (const action of array(
+      template.speech?.actions ?? [],
+      LIMITS.actions,
+    )) {
+      animationId(action.action);
+    }
+  }
 }
 
 /** Hash the exact server/shared rule implementation, including reused client kernels. */
@@ -144,6 +167,7 @@ export class OriginalContent {
     if (!descriptor) throw new Error("Map is not in the admitted catalog");
     const manifest = validateManifest(await this.json(descriptor));
     if (manifest.id !== id) throw new Error("Map descriptor identity mismatch");
+    validateLifeAnimations(manifest);
     nearestSavedArrival(manifest, { x: 0, y: 0, facing: 1 });
     this.maps.set(id, manifest);
     return manifest;
