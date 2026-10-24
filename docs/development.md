@@ -374,3 +374,13 @@ flowchart TD
 | PostgreSQL                                                            | Accounts, character progress, transactions, Studio revisions/uploads and world releases; also the registered asset catalog |
 
 Original artwork stays in generated files. The server reads gameplay definitions from that generated package, combines them with the active custom world release from PostgreSQL, and controls online dialogue, movement, rewards and transactions. The client sends inputs and choices, renders the server's responses, and fetches original visuals from the frontend. [Reference data](#definitions) explains why the current extraction packages both visuals and gameplay data.
+
+## Fatal simulation cleanup
+
+A fatal simulation error stops the listener and retires characters through shutdown,
+releasing their account and character ownership before closing the world and database.
+Shutdown fences new socket admission and waits for already admitted lease acquisition
+and field joins before draining actors, keeping the world and database alive until
+those owners settle. Cleanup attempts every resource and actor even if an earlier
+checkpoint fails, while preserving the first failure. Fix the reported error, restart
+backend and frontend, then sign in again.

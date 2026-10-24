@@ -42,6 +42,8 @@ export class GameplayGateway {
     this.accounts = new Map();
     this.characters = new Map();
     this.joining = new Set();
+    this.admissions = new Set();
+    this.stopping = false;
     this.lastPrune = 0;
     this.auth.onRevoke = this.revoke.bind(this);
     this.handlers = {
@@ -74,6 +76,7 @@ export class GameplayGateway {
   }
 
   upgrade(request, server, address) {
+    if (this.stopping) throw protocolError("SERVER_BUSY");
     this.auth.origin(request);
     const session = this.auth.session(request);
     if (
@@ -139,6 +142,10 @@ export class GameplayGateway {
   }
 
   open(socket) {
+    if (this.stopping) {
+      this.publications.close(socket, "SERVER_BUSY");
+      return;
+    }
     this.sockets.add(socket);
     this.world.log?.("socket.open", {
       account: socket.data.session.accountId,
@@ -148,6 +155,10 @@ export class GameplayGateway {
 
   message(socket, bytes) {
     if (socket.data.closed) return;
+    if (this.stopping) {
+      this.publications.close(socket, "SERVER_BUSY");
+      return;
+    }
     try {
       if (!this.auth.active(socket.data.session)) {
         throw protocolError("SESSION_EXPIRED");
@@ -169,7 +180,9 @@ export class GameplayGateway {
   }
 
   async hello(socket, message) {
-    if (this.activation?.busy) throw protocolError("SERVER_BUSY");
+    if (this.stopping || this.activation?.busy) {
+      throw protocolError("SERVER_BUSY");
+    }
     const session = socket.data.session;
     const characterId = this.auth.consumeTicket(session, message.ticket);
     if (!sameWorldIdentity(message, this.world.content)) {
@@ -181,6 +194,7 @@ export class GameplayGateway {
     this.joining.add(session.accountId);
     try {
       const actor = await this.obtainActor(socket, characterId, message.resume);
+      if (this.stopping) throw protocolError("SERVER_BUSY");
       if (socket.data.closed || !this.auth.active(session)) {
         if (!actor.connection) actor.disconnectedAt = Date.now();
         throw protocolError("SESSION_EXPIRED");
@@ -200,7 +214,18 @@ export class GameplayGateway {
     }
   }
 
-  async obtainActor(socket, characterId, resume) {
+  obtainActor(socket, characterId, resume) {
+    if (this.stopping || this.admissions.size >= this.config.maxConnections) {
+      return Promise.reject(protocolError("SERVER_BUSY"));
+    }
+    const task = this.acquireActor(socket, characterId, resume);
+    this.admissions.add(task);
+    const settled = () => this.admissions.delete(task);
+    void task.then(settled, settled);
+    return task;
+  }
+
+  async acquireActor(socket, characterId, resume) {
     const session = socket.data.session;
     const existing = this.accounts.get(session.accountId);
     if (existing) {
@@ -535,6 +560,7 @@ export class GameplayGateway {
   }
 
   drain(socket) {
+    if (this.stopping) return;
     if (socket.data.needsSnapshot && socket.data.actor && !socket.data.closed) {
       socket.data.needsSnapshot = false;
       this.publications.publish(socket.data.actor, {
@@ -696,11 +722,28 @@ export class GameplayGateway {
   }
 
   async close() {
+    this.stopping = true;
+    let failure;
     for (const socket of this.sockets) {
-      this.publications.close(socket, "SERVER_BUSY");
+      try {
+        this.publications.close(socket, "SERVER_BUSY");
+      } catch (error) {
+        failure ??= error;
+      }
     }
-    for (const actor of this.characters.values()) await this.retire(actor);
+    // Admission is fenced before this fixed, connection-bounded snapshot. A join
+    // may still install its leased actor; keep the world and database alive until
+    // it settles, then include that actor in the ordinary retirement drain.
+    await Promise.allSettled([...this.admissions]);
+    for (const actor of [...this.characters.values()]) {
+      try {
+        await this.retire(actor);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
     this.sockets.clear();
+    if (failure) throw failure;
   }
 }
 import { sameWorldIdentity } from "../../shared/world-content.js";

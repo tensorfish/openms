@@ -4,6 +4,7 @@ import { OnlineWorld } from "../src/world.js";
 import { transitionActor } from "../src/field-transition.js";
 import { createProfile } from "../../client/src/profile/profile-validation.js";
 import { decodeClient } from "../../shared/protocol.js";
+import { createLifecycle } from "../src/index.js";
 
 function fixture() {
   const persisted = [];
@@ -62,6 +63,266 @@ function fixture() {
   gateway.characters.set(actor.id, actor);
   return { actor, field, gateway, world, session, persisted, released };
 }
+
+test("fatal simulation tick stops admission and completes orderly cleanup", async () => {
+  const probe = fixture();
+  const calls = [];
+  const server = {
+    stop(force) {
+      calls.push(["server", force]);
+    },
+  };
+  let worldClosed = false;
+  probe.world.step = () => {
+    throw new Error("fatal simulation fault");
+  };
+  probe.world.close = async () => {
+    worldClosed = true;
+  };
+  probe.gateway.database.close = async () => calls.push(["database"]);
+  const lifecycle = createLifecycle({
+    server,
+    world: probe.world,
+    gateway: probe.gateway,
+    database: probe.gateway.database,
+    log() {},
+  });
+
+  lifecycle.tick();
+  expect(calls).toContainEqual(["server", true]);
+  await lifecycle.close();
+  await lifecycle.close();
+
+  expect(worldClosed).toBe(true);
+  expect(probe.released).toEqual([probe.actor.id]);
+  expect(probe.gateway.accounts.size).toBe(0);
+  expect(probe.gateway.characters.size).toBe(0);
+  expect(probe.world.actors.size).toBe(0);
+  expect(calls.filter(([kind]) => kind === "database")).toHaveLength(1);
+  expect(calls.filter(([kind]) => kind === "server")).toHaveLength(1);
+});
+
+test("shutdown continues world and database cleanup after gateway retirement fails", async () => {
+  const calls = [];
+  const failure = new Error("retirement failed");
+  const lifecycle = createLifecycle({
+    server: {
+      stop() {
+        calls.push("server");
+      },
+    },
+    gateway: {
+      sockets: new Set(),
+      close: async () => {
+        calls.push("gateway");
+        throw failure;
+      },
+    },
+    world: {
+      step() {},
+      close: async () => calls.push("world"),
+    },
+    database: { close: async () => calls.push("database") },
+    log() {},
+  });
+
+  const firstClose = lifecycle.close();
+  expect(lifecycle.close()).toBe(firstClose);
+  await expect(firstClose).rejects.toBe(failure);
+  expect(calls).toEqual(["gateway", "server", "world", "database"]);
+});
+
+test("a fatal tick still drains joins when a socket close throws", async () => {
+  const probe = joiningFixture("world");
+  const joining = probe.gateway.hello(probe.socket, {}).catch((error) => error);
+  await probe.entered.promise;
+  const failure = new Error("socket close failed");
+  probe.gateway.publications.close = () => {
+    throw failure;
+  };
+  probe.world.step = () => {
+    throw new Error("fatal simulation fault");
+  };
+  const lifecycle = createLifecycle({
+    server: { stop() {} },
+    world: probe.world,
+    gateway: probe.gateway,
+    database: probe.database,
+    log() {},
+  });
+  expect(() => lifecycle.tick()).not.toThrow();
+  expect(probe.gateway.stopping).toBe(true);
+  expect(probe.calls).toEqual(["lease"]);
+  const closing = lifecycle.close().catch((error) => error);
+  probe.gate.resolve();
+  expect((await joining).code).toBe("SERVER_BUSY");
+  expect(await closing).toBe(failure);
+  expect(probe.released).toEqual([probe.actor.id]);
+  expect(probe.gateway.characters.size).toBe(0);
+  expect(probe.calls).toEqual(["lease", "world", "database"]);
+});
+
+test("gateway shutdown retires every actor after an earlier checkpoint fails", async () => {
+  const probe = fixture();
+  const second = {
+    ...probe.actor,
+    id: "second-character",
+    accountId: "second-account",
+    sessionId: "second-session",
+    profile: structuredClone(probe.actor.profile),
+    simulation: fixtureSimulation(),
+  };
+  probe.field.characters.set(second.id, second);
+  probe.world.actors.set(second.id, second);
+  probe.gateway.accounts.set(second.accountId, second);
+  probe.gateway.characters.set(second.id, second);
+  const failure = new Error("first checkpoint failed");
+  probe.gateway.database.checkpoint = async (actor) => {
+    if (actor.id === probe.actor.id) throw failure;
+  };
+
+  await expect(probe.gateway.close()).rejects.toBe(failure);
+
+  expect(probe.released).toEqual([probe.actor.id, second.id]);
+  expect(probe.gateway.accounts.size).toBe(0);
+  expect(probe.gateway.characters.size).toBe(0);
+  expect(probe.world.actors.size).toBe(0);
+});
+
+function joiningFixture(stage) {
+  const probe = fixture();
+  probe.gateway.accounts.clear();
+  probe.gateway.characters.clear();
+  probe.world.actors.clear();
+  probe.field.characters.clear();
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  const calls = [];
+  probe.gateway.auth.consumeTicket = () => probe.actor.id;
+  probe.gateway.auth.active = () => true;
+  probe.database = probe.gateway.database;
+  probe.database.acquireLease = async () => {
+    calls.push("lease");
+    if (stage === "lease") {
+      entered.resolve();
+      await gate.promise;
+    }
+    return probe.actor;
+  };
+  probe.world.join = async (actor) => {
+    if (stage !== "lease") {
+      entered.resolve();
+      await gate.promise;
+    }
+    if (stage === "failed-world") throw new Error("join failed");
+    probe.world.actors.set(actor.id, actor);
+    probe.field.characters.set(actor.id, actor);
+  };
+  probe.world.close = async () => calls.push("world");
+  probe.database.close = async () => calls.push("database");
+  const socket = {
+    data: { session: probe.session, closed: false },
+    send: () => 1,
+    close() {},
+  };
+  probe.gateway.sockets.add(socket);
+  return { ...probe, socket, entered, gate, calls };
+}
+
+for (const stage of [
+  "lease",
+  "world",
+  "failed-world",
+  "socket-close",
+  "listener-stop",
+]) {
+  test(`shutdown settles an admitted ${stage} join before closing the world and database`, async () => {
+    const probe = joiningFixture(stage);
+    const failure = ["socket-close", "listener-stop"].includes(stage)
+      ? new Error(`${stage} failed`)
+      : null;
+    if (stage === "socket-close") {
+      probe.gateway.publications.close = () => {
+        throw failure;
+      };
+    }
+    const joining = probe.gateway
+      .hello(probe.socket, {})
+      .catch((error) => error);
+    await probe.entered.promise;
+    const lifecycle = createLifecycle({
+      server: {
+        stop() {
+          if (stage === "listener-stop") throw failure;
+        },
+      },
+      world: probe.world,
+      gateway: probe.gateway,
+      database: probe.database,
+      log() {},
+    });
+    const closing = lifecycle.close().then(
+      () => null,
+      (error) => error,
+    );
+    await Promise.resolve();
+    expect(probe.gateway.stopping).toBe(true);
+    expect(probe.calls).toEqual(["lease"]);
+    expect(probe.gateway.admissions.size).toBe(1);
+    probe.gate.resolve();
+    const result = await joining;
+    expect(result.code ?? result.message).toBe(
+      stage === "failed-world" ? "join failed" : "SERVER_BUSY",
+    );
+    expect(await closing).toBe(failure);
+    expect(probe.socket.data.actor).toBeUndefined();
+    expect(probe.released).toEqual([probe.actor.id]);
+    expect(probe.persisted).toHaveLength(stage === "failed-world" ? 0 : 1);
+    expect(probe.gateway.admissions.size).toBe(0);
+    expect(probe.gateway.joining.size).toBe(0);
+    expect(probe.gateway.accounts.size).toBe(0);
+    expect(probe.gateway.characters.size).toBe(0);
+    expect(probe.world.actors.size).toBe(0);
+    expect(probe.calls).toEqual(["lease", "world", "database"]);
+  });
+}
+
+test("shutdown refuses newly queued socket admission without acquiring another lease", async () => {
+  const probe = joiningFixture("world");
+  await probe.gateway.close();
+  expect(() => probe.gateway.upgrade({}, {}, "loopback")).toThrow(
+    "SERVER_BUSY",
+  );
+  await expect(probe.gateway.hello(probe.socket, {})).rejects.toThrow(
+    "SERVER_BUSY",
+  );
+  await expect(
+    probe.gateway.obtainActor(probe.socket, probe.actor.id, null),
+  ).rejects.toThrow("SERVER_BUSY");
+  const lateSocket = { data: {}, send: () => 1, close() {} };
+  probe.gateway.open(lateSocket);
+  expect(lateSocket.data.closed).toBe(true);
+  expect(probe.gateway.sockets.size).toBe(0);
+  expect(probe.calls).toEqual([]);
+});
+
+test("pending admission retains the connection capacity reservation after its socket closes", async () => {
+  const probe = joiningFixture("world");
+  probe.gateway.config.maxConnections = 1;
+  const joining = probe.gateway.obtainActor(probe.socket, probe.actor.id, null);
+  await probe.entered.promise;
+  probe.gateway.sockets.delete(probe.socket);
+  await expect(
+    probe.gateway.obtainActor(probe.socket, "another-character", null),
+  ).rejects.toThrow("SERVER_BUSY");
+  expect(probe.calls).toEqual(["lease"]);
+  const closing = probe.gateway.close();
+  probe.gate.resolve();
+  await joining;
+  await closing;
+  expect(probe.released).toEqual([probe.actor.id]);
+  expect(probe.gateway.admissions.size).toBe(0);
+});
 
 function fixtureSimulation() {
   return {

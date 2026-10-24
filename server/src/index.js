@@ -125,7 +125,7 @@ async function listen({ config, http, gateway, database }) {
   }
 }
 
-function createLifecycle({ server, world, gateway, database, log }) {
+export function createLifecycle({ server, world, gateway, database, log }) {
   let stopped = false;
   let closing = null;
   const timer = setInterval(tick, 10);
@@ -140,29 +140,64 @@ function createLifecycle({ server, world, gateway, database, log }) {
       console.error(
         logPrefix("server"),
         "Authoritative simulation suspended:",
-        error.message,
+        error.stack ?? error.message,
       );
       log("simulation.suspended", { code: error.code ?? error.name });
-      for (const socket of gateway.sockets) {
-        gateway.publications.close(socket, "SERVER_BUSY");
-      }
+      close().catch((failure) => {
+        console.error(
+          logPrefix("server"),
+          "Server shutdown failed:",
+          failure.message,
+        );
+      });
     }
   }
   async function finish() {
     log("shutdown", { phase: "start" });
     stopped = true;
     clearInterval(timer);
-    await gateway.close();
-    await world.close();
-    await server.stop(true);
-    await database.close();
+    const failure = await closeResources({
+      server,
+      gateway,
+      world,
+      database,
+    });
     log("shutdown", { phase: "complete" });
+    if (failure) throw failure;
   }
   function close() {
     closing ??= finish();
     return closing;
   }
-  return { close };
+  return { close, tick };
+}
+
+async function closeResources({ server, gateway, world, database }) {
+  // Fence admission synchronously and retain gateway cleanup while stopping the
+  // listener. Attach its error handler before either owner can finish shutdown.
+  const gatewayClosing = gateway.close().then(
+    () => null,
+    (error) => error,
+  );
+  let failure;
+  try {
+    await server.stop(true);
+  } catch (error) {
+    failure = error;
+  }
+  const gatewayFailure = await gatewayClosing;
+  failure ??= gatewayFailure;
+  try {
+    await world.close();
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await database.close();
+  } catch (error) {
+    failure ??= error;
+  }
+  return failure;
 }
 
 if (import.meta.main) {
